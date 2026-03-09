@@ -1,0 +1,1057 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Monte Carlo Option Pricing Engine</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css"/>
+<style>
+  .katex { color: #1a2744 !important; }
+  .katex * { color: inherit !important; }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+</head>
+<body style="margin:0;padding:0;background:#060810">
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+const GOLD  = "#f0c060";
+const GREEN = "#4ade80";
+const RED   = "#f87171";
+const CW = 1600, CH = 700;
+
+// ── Math helpers ──────────────────────────────────────────────────────────────
+function erf(x) {
+  const a1=0.254829592,a2=-0.284496736,a3=1.421413741,a4=-1.453152027,a5=1.061405429,p=0.3275911;
+  const sign = x < 0 ? -1 : 1; x = Math.abs(x);
+  const t = 1/(1+p*x);
+  const y = 1-(((((a5*t+a4)*t)+a3)*t+a2)*t+a1)*t*Math.exp(-(x*x));
+  return sign*y;
+}
+function normCDF(x) { return 0.5*(1+erf(x/Math.sqrt(2))); }
+function blackScholes(S,K,T,r,sigma,type) {
+  if (T<=0) return type==="call"?Math.max(S-K,0):Math.max(K-S,0);
+  const d1=(Math.log(S/K)+(r+0.5*sigma*sigma)*T)/(sigma*Math.sqrt(T));
+  const d2=d1-sigma*Math.sqrt(T);
+  if (type==="call") return S*normCDF(d1)-K*Math.exp(-r*T)*normCDF(d2);
+  return K*Math.exp(-r*T)*normCDF(-d2)-S*normCDF(-d1);
+}
+function boxMuller() {
+  let u=0,v=0;
+  while(u===0) u=Math.random();
+  while(v===0) v=Math.random();
+  return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);
+}
+
+// ── Heston stochastic volatility simulation ───────────────────────────────────
+// dS = r·S·dt + √v·S·dW_S
+// dv = κ(θ − v)dt + ξ·√v·dW_v       corr(dW_S, dW_v) = ρ
+// Full truncation scheme (Lord et al. 2010) keeps v ≥ 0
+function runHeston(S,K,T,r,v0,kappa,theta,xi,rho,n,steps,type) {
+  const dt=T/steps, sqDt=Math.sqrt(dt);
+  const paths=[]; let sumPayoff=0;
+  for (let i=0;i<n;i++) {
+    let St=S, vt=v0;
+    const path=[St];
+    for (let j=0;j<steps;j++) {
+      const z1=boxMuller(), z2=boxMuller();
+      const zS=z1, zV=rho*z1+Math.sqrt(1-rho*rho)*z2;
+      const sqV=Math.sqrt(Math.max(vt,0));
+      vt=Math.max(vt+kappa*(theta-vt)*dt+xi*sqV*sqDt*zV, 0);
+      St=St*Math.exp((r-0.5*Math.max(vt,0))*dt+sqV*sqDt*zS);
+      path.push(St);
+    }
+    paths.push(path);
+    sumPayoff += type==="call"?Math.max(St-K,0):Math.max(K-St,0);
+  }
+  return { price: Math.exp(-r*T)*sumPayoff/n, paths };
+}
+
+// ── Canvas: path chart ────────────────────────────────────────────────────────
+function drawPaths(canvas, paths, S, K, T, type, marketPrice) {
+  if (!canvas||!paths.length) return;
+  const ctx=canvas.getContext("2d");
+  const W=canvas.width, H=canvas.height;
+  const PAD={top:40,right:80,bottom:42,left:62};
+  const IW=W-PAD.left-PAD.right, IH=H-PAD.top-PAD.bottom;
+
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle="#07090f"; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle="rgba(255,255,255,0.012)"; ctx.fillRect(PAD.left,PAD.top,IW,IH);
+
+  const steps=paths[0].length-1;
+  const allP=paths.flat();
+  const rawMin=Math.min(...allP), rawMax=Math.max(...allP);
+  const pad=(rawMax-rawMin)*0.12;
+  const minP=rawMin-pad, maxP=rawMax+pad;
+  const toX=i=>PAD.left+(i/steps)*IW;
+  const toY=p=>PAD.top+IH-((p-minP)/(maxP-minP))*IH;
+
+  // Percentile bands
+  const nPts=steps+1;
+  const pct=(arr,q)=>arr[Math.max(0,Math.floor(arr.length*q))];
+  const b={p10:[],p25:[],p50:[],p75:[],p90:[]};
+  for (let i=0;i<nPts;i++) {
+    const vals=paths.map(p=>p[i]).sort((a,b)=>a-b);
+    b.p10.push(pct(vals,.10)); b.p25.push(pct(vals,.25));
+    b.p50.push(pct(vals,.50)); b.p75.push(pct(vals,.75));
+    b.p90.push(pct(vals,.90));
+  }
+  const traceBand=(upper,lower)=>{
+    ctx.beginPath();
+    upper.forEach((p,i)=>{const x=toX(i),y=toY(p);i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);});
+    for(let i=nPts-1;i>=0;i--) ctx.lineTo(toX(i),toY(lower[i]));
+    ctx.closePath();
+  };
+  traceBand(b.p90,b.p10);
+  const og=ctx.createLinearGradient(PAD.left,0,PAD.left+IW,0);
+  og.addColorStop(0,"rgba(80,120,200,0.0)"); og.addColorStop(.3,"rgba(80,120,200,0.05)"); og.addColorStop(1,"rgba(80,120,200,0.03)");
+  ctx.fillStyle=og; ctx.fill();
+  traceBand(b.p75,b.p25);
+  const ig=ctx.createLinearGradient(PAD.left,0,PAD.left+IW,0);
+  ig.addColorStop(0,"rgba(80,140,220,0.0)"); ig.addColorStop(.3,"rgba(80,140,220,0.09)"); ig.addColorStop(1,"rgba(80,140,220,0.06)");
+  ctx.fillStyle=ig; ctx.fill();
+
+  // Grid
+  ctx.font="10px Arial"; ctx.textAlign="right";
+  for(let i=0;i<=5;i++){
+    const p=minP+(maxP-minP)*(i/5), y=toY(p);
+    ctx.strokeStyle="rgba(255,255,255,0.04)"; ctx.lineWidth=1; ctx.setLineDash([3,5]);
+    ctx.beginPath(); ctx.moveTo(PAD.left,y); ctx.lineTo(W-PAD.right,y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle="rgba(200,216,232,0.22)"; ctx.fillText("$"+p.toFixed(0),PAD.left-8,y+4);
+  }
+  [0,.25,.5,.75,1].forEach((t,idx)=>{
+    const x=toX(t*steps);
+    ctx.strokeStyle="rgba(255,255,255,0.025)"; ctx.lineWidth=1; ctx.setLineDash([2,6]);
+    ctx.beginPath(); ctx.moveTo(x,PAD.top); ctx.lineTo(x,H-PAD.bottom); ctx.stroke();
+    ctx.setLineDash([]);
+    if(idx===0||idx===4){
+      ctx.fillStyle="rgba(200,216,232,0.2)"; ctx.textAlign=idx===0?"left":"right"; ctx.font="9px Arial";
+      ctx.fillText(idx===0?"today":"expiry",x+(idx===0?3:-3),H-PAD.bottom+16);
+    }
+  });
+
+  // Individual paths
+  const display=paths.slice(0,250);
+  const itmPaths=[],otmPaths=[];
+  display.forEach(path=>{
+    const end=path[path.length-1];
+    (type==="call"?end>K:end<K)?itmPaths.push(path):otmPaths.push(path);
+  });
+  otmPaths.forEach(p=>{
+    ctx.strokeStyle="rgba(248,100,100,0.055)"; ctx.lineWidth=0.6;
+    ctx.beginPath(); p.forEach((v,i)=>{const x=toX(i),y=toY(v);i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);}); ctx.stroke();
+  });
+  itmPaths.forEach(p=>{
+    ctx.strokeStyle="rgba(74,222,128,0.065)"; ctx.lineWidth=0.6;
+    ctx.beginPath(); p.forEach((v,i)=>{const x=toX(i),y=toY(v);i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);}); ctx.stroke();
+  });
+
+  // Highlight paths
+  const pick=(arr,n)=>{const out=[];for(let i=0;i<n&&i<arr.length;i++)out.push(arr[Math.floor((i/n)*arr.length)]);return out;};
+  pick(itmPaths,6).forEach(path=>{
+    const g=ctx.createLinearGradient(toX(0),0,toX(steps),0);
+    g.addColorStop(0,"rgba(74,222,128,0.0)"); g.addColorStop(.4,"rgba(74,222,128,0.22)"); g.addColorStop(1,"rgba(74,222,128,0.5)");
+    ctx.strokeStyle=g; ctx.lineWidth=1.1; ctx.shadowColor="rgba(74,222,128,0.2)"; ctx.shadowBlur=6;
+    ctx.beginPath(); path.forEach((v,i)=>{const x=toX(i),y=toY(v);i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);}); ctx.stroke();
+    ctx.shadowBlur=0;
+  });
+  pick(otmPaths,3).forEach(path=>{
+    const g=ctx.createLinearGradient(toX(0),0,toX(steps),0);
+    g.addColorStop(0,"rgba(248,113,113,0.0)"); g.addColorStop(.5,"rgba(248,113,113,0.18)"); g.addColorStop(1,"rgba(248,113,113,0.35)");
+    ctx.strokeStyle=g; ctx.lineWidth=0.9;
+    ctx.beginPath(); path.forEach((v,i)=>{const x=toX(i),y=toY(v);i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);}); ctx.stroke();
+  });
+
+  // Median
+  ctx.lineWidth=1.5; ctx.setLineDash([4,6]); ctx.strokeStyle="rgba(200,216,232,0.3)";
+  ctx.beginPath(); b.p50.forEach((v,i)=>{const x=toX(i),y=toY(v);i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);}); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Strike line
+  const ky=toY(K);
+  if(ky>=PAD.top&&ky<=H-PAD.bottom){
+    ctx.shadowColor="rgba(240,192,96,0.4)"; ctx.shadowBlur=10;
+    ctx.strokeStyle="rgba(240,192,96,0.7)"; ctx.lineWidth=1.2; ctx.setLineDash([6,5]);
+    ctx.beginPath(); ctx.moveTo(PAD.left,ky); ctx.lineTo(W-PAD.right,ky); ctx.stroke();
+    ctx.setLineDash([]); ctx.shadowBlur=0;
+    const pW=62,pH=18,pX=W-PAD.right+5;
+    ctx.fillStyle="rgba(240,192,96,0.14)"; ctx.strokeStyle="rgba(240,192,96,0.35)"; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.roundRect?ctx.roundRect(pX,ky-pH/2,pW,pH,4):ctx.rect(pX,ky-pH/2,pW,pH);
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle="rgba(240,192,96,0.9)"; ctx.font="bold 10px Arial"; ctx.textAlign="left";
+    ctx.fillText("K  $"+K,pX+6,ky+4);
+  }
+
+  // Spot line
+  const sy=toY(S);
+  if(sy>=PAD.top&&sy<=H-PAD.bottom){
+    ctx.strokeStyle="rgba(200,216,232,0.2)"; ctx.lineWidth=1; ctx.setLineDash([2,6]);
+    ctx.beginPath(); ctx.moveTo(PAD.left,sy); ctx.lineTo(W-PAD.right,sy); ctx.stroke();
+    ctx.setLineDash([]);
+    const pW=60,pH=17;
+    ctx.fillStyle="rgba(200,216,232,0.08)"; ctx.strokeStyle="rgba(200,216,232,0.18)"; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.roundRect?ctx.roundRect(PAD.left-pW-5,sy-pH/2,pW,pH,4):ctx.rect(PAD.left-pW-5,sy-pH/2,pW,pH);
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle="rgba(200,216,232,0.55)"; ctx.font="9px Arial"; ctx.textAlign="right";
+    ctx.fillText("S₀  $"+S,PAD.left-8,sy+4);
+  }
+
+  // Expiry scatter
+  const finals=paths.map(p=>p[p.length-1]);
+  const ex=toX(steps);
+  finals.slice(0,300).forEach(f=>{
+    const y=toY(f),itm=type==="call"?f>K:f<K;
+    ctx.beginPath(); ctx.arc(ex+3+Math.random()*8,y,1.5,0,Math.PI*2);
+    ctx.fillStyle=itm?"rgba(74,222,128,0.55)":"rgba(248,113,113,0.4)"; ctx.fill();
+  });
+
+  // P10/P90 bar
+  const sf=[...finals].sort((a,b)=>a-b);
+  const p10y=toY(sf[Math.floor(sf.length*.10)]);
+  const p90y=toY(sf[Math.floor(sf.length*.90)]);
+  const p50y=toY(sf[Math.floor(sf.length*.50)]);
+  const barX=ex+20;
+  ctx.fillStyle="rgba(200,216,232,0.06)"; ctx.fillRect(barX-1,p90y,2,p10y-p90y);
+  ctx.fillStyle="rgba(200,216,232,0.65)"; ctx.fillRect(barX-5,p50y-1,10,2);
+  ctx.fillStyle="rgba(200,216,232,0.3)";
+  ctx.fillRect(barX-4,p90y,8,1); ctx.fillRect(barX-4,p10y,8,1);
+  ctx.fillStyle="rgba(200,216,232,0.28)"; ctx.font="9px Arial"; ctx.textAlign="left";
+  ctx.fillText("P90  $"+sf[Math.floor(sf.length*.90)].toFixed(0),barX+7,p90y+4);
+  ctx.fillText("P10  $"+sf[Math.floor(sf.length*.10)].toFixed(0),barX+7,p10y+4);
+
+  // Title
+  ctx.fillStyle="rgba(200,216,232,0.16)"; ctx.font="9px Arial"; ctx.textAlign="left";
+  ctx.fillText(paths.length+" SIMULATED PATHS · HESTON MODEL",PAD.left+2,PAD.top-16);
+  ctx.textAlign="right";
+  ctx.fillText("P25–P75 ▪ P10–P90 bands",W-PAD.right-2,PAD.top-16);
+}
+
+// ── Canvas: histogram ─────────────────────────────────────────────────────────
+function drawHistogram(canvas, paths, K, type) {
+  if (!canvas||!paths.length) return;
+  const ctx=canvas.getContext("2d");
+  const W=canvas.width, H=130;
+  const PAD={left:8,right:56,top:10,bottom:20};
+  const IW=W-PAD.left-PAD.right, IH=H-PAD.top-PAD.bottom;
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle="#080c12"; ctx.fillRect(0,0,W,H);
+
+  const finals=paths.map(p=>p[p.length-1]);
+  const minF=Math.min(...finals),maxF=Math.max(...finals);
+  const range=maxF-minF||1;
+  const bins=70, counts=new Array(bins).fill(0);
+  finals.forEach(f=>{
+    const b=Math.min(bins-1,Math.floor(((f-minF)/range)*bins));
+    counts[b]++;
+  });
+  const maxCount=Math.max(...counts);
+  const bw=IW/bins;
+  const toX=f=>PAD.left+((f-minF)/range)*IW;
+
+  counts.forEach((c,i)=>{
+    if(c===0)return;
+    const x=PAD.left+i*bw, bH=(c/maxCount)*IH, y=PAD.top+IH-bH;
+    const fVal=minF+(i/bins)*range;
+    const itm=type==="call"?fVal>K:fVal<K;
+    ctx.fillStyle=itm?"rgba(74,222,128,0.45)":"rgba(248,113,113,0.35)";
+    ctx.fillRect(x,y,Math.max(bw-0.5,0.5),bH);
+  });
+
+  const ky=toX(K);
+  if(ky>=PAD.left&&ky<=W-PAD.right){
+    ctx.strokeStyle="rgba(240,192,96,0.75)"; ctx.lineWidth=1.2; ctx.setLineDash([4,4]);
+    ctx.beginPath(); ctx.moveTo(ky,PAD.top); ctx.lineTo(ky,PAD.top+IH); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle="rgba(240,192,96,0.8)"; ctx.font="bold 8px Arial"; ctx.textAlign="left";
+    ctx.fillText("K",ky+3,PAD.top+10);
+  }
+
+  ctx.fillStyle="rgba(200,216,232,0.2)"; ctx.font="8px Arial"; ctx.textAlign="left";
+  ctx.fillText("$"+minF.toFixed(0),PAD.left,H-4);
+  ctx.textAlign="right";
+  ctx.fillText("$"+maxF.toFixed(0),W-PAD.right-2,H-4);
+}
+
+// ── Formula renderer ──────────────────────────────────────────────────────────
+function Formula({tex,note}) {
+  const ref=useRef(null);
+  useEffect(()=>{
+    if(ref.current&&window.katex){
+      try{ katex.render(tex,ref.current,{displayMode:true,throwOnError:false}); }catch(e){}
+    }
+  },[tex]);
+  return (
+    <div style={{margin:"16px 0"}}>
+      <div ref={ref} style={{background:"rgba(26,39,68,0.06)",border:"1px solid rgba(26,39,68,0.12)",borderRadius:8,padding:"14px 20px",overflowX:"auto"}}/>
+      {note&&<div style={{fontSize:12,color:"#555",marginTop:6,fontStyle:"italic",paddingLeft:4}}>{note}</div>}
+    </div>
+  );
+}
+
+// ── Heston explainer diagrams ─────────────────────────────────────────────────
+function DiagramHestonPaths() {
+  const s=[100], v=[0.04];
+  for(let i=0;i<60;i++){
+    const zS=Math.sin(i*2.3+1.1)*0.7+Math.cos(i*1.1)*0.4;
+    const zV=Math.sin(i*1.7+0.5)*0.6+Math.cos(i*2.1)*0.3;
+    const dt=0.01,kappa=2,theta=0.04,xi=0.5,rho=-0.7;
+    const vt=v[v.length-1], sv=Math.sqrt(Math.max(vt,0));
+    v.push(Math.max(vt+kappa*(theta-vt)*dt+xi*sv*Math.sqrt(dt)*zV,0));
+    s.push(s[s.length-1]*Math.exp((0.05-0.5*vt)*dt+sv*Math.sqrt(dt)*zS));
+  }
+  const sMin=Math.min(...s),sMax=Math.max(...s);
+  const vMax=Math.max(...v)*1.3;
+  const toSX=i=>40+i*6.8, toSY=p=>130-((p-sMin)/(sMax-sMin))*100;
+  const toVX=i=>40+i*6.8, toVY=p=>270-((p-0)/(vMax-0))*80;
+  return (
+    <svg viewBox="0 0 500 300" style={{width:"100%",background:"#f8f8f8",borderRadius:8,marginBottom:14,border:"1px solid #e0e0e0"}}>
+      <text x="250" y="16" fontSize="10" fill="#555" textAnchor="middle" fontWeight="700">PRICE (S) — driven by the variance below</text>
+      <line x1="35" y1="20" x2="35" y2="140" stroke="#aaa" strokeWidth="1"/>
+      <line x1="35" y1="140" x2="460" y2="140" stroke="#aaa" strokeWidth="1"/>
+      <polyline points={s.map((p,i)=>`${toSX(i)},${toSY(p)}`).join(' ')} fill="none" stroke="#1a1a2e" strokeWidth="2"/>
+      <circle cx="40" cy={toSY(s[0])} r="4" fill="#f0c060"/>
+      <text x="250" y="160" fontSize="10" fill="#555" textAnchor="middle" fontWeight="700">VARIANCE (v) — mean-reverting, random</text>
+      <line x1="35" y1="165" x2="35" y2="285" stroke="#aaa" strokeWidth="1"/>
+      <line x1="35" y1="285" x2="460" y2="285" stroke="#aaa" strokeWidth="1"/>
+      <line x1="35" y1={toVY(0.04)} x2="460" y2={toVY(0.04)} stroke="#f0c060" strokeWidth="1" strokeDasharray="5 3"/>
+      <text x="463" y={toVY(0.04)+4} fontSize="9" fill="#7a6010">θ</text>
+      <polyline points={v.map((p,i)=>`${toVX(i)},${toVY(p)}`).join(' ')} fill="none" stroke="#e05a9a" strokeWidth="2"/>
+      <circle cx="40" cy={toVY(v[0])} r="4" fill="#e05a9a"/>
+      <text x="38" y="285" fontSize="8" fill="#888">t=0</text>
+      <text x="444" y="285" fontSize="8" fill="#888">t=T</text>
+      <text x="13" y="80" fontSize="8" fill="#555" textAnchor="middle" transform="rotate(-90,13,80)">Price</text>
+      <text x="13" y="225" fontSize="8" fill="#555" textAnchor="middle" transform="rotate(-90,13,225)">Var</text>
+    </svg>
+  );
+}
+function DiagramMeanReversion() {
+  const rows=[];
+  for(let i=0;i<=80;i++){
+    const t=i/80*2, theta=0.04, x=40+i*5.2;
+    rows.push({x,y1:150-((theta+(0.12-theta)*Math.exp(-1.5*t))*800),
+                  y2:150-((theta+(0.04-theta)*Math.exp(-1.5*t))*800),
+                  y3:150-((theta+(0.005-theta)*Math.exp(-1.5*t))*800)});
+  }
+  const thetaY=150-0.04*800;
+  return (
+    <svg viewBox="0 0 500 170" style={{width:"100%",background:"#f8f8f8",borderRadius:8,marginBottom:14,border:"1px solid #e0e0e0"}}>
+      <line x1="40" y1="20" x2="40" y2="155" stroke="#555" strokeWidth="1.5"/>
+      <line x1="35" y1="155" x2="460" y2="155" stroke="#555" strokeWidth="1.5"/>
+      <line x1="40" y1={thetaY} x2="460" y2={thetaY} stroke="#f0c060" strokeWidth="1.5" strokeDasharray="6 4"/>
+      <text x="463" y={thetaY+4} fontSize="9" fill="#7a6010" fontWeight="700">θ</text>
+      <polyline points={rows.map(r=>`${r.x},${r.y1}`).join(' ')} fill="none" stroke="#f87171" strokeWidth="2"/>
+      <polyline points={rows.map(r=>`${r.x},${r.y2}`).join(' ')} fill="none" stroke="#888" strokeWidth="1.5" strokeDasharray="4 3"/>
+      <polyline points={rows.map(r=>`${r.x},${r.y3}`).join(' ')} fill="none" stroke="#4ade80" strokeWidth="2"/>
+      <text x="58" y="36" fontSize="9" fill="#dc2626">v₀ high → pulled down toward θ</text>
+      <text x="58" y="140" fontSize="9" fill="#16a34a">v₀ low → pulled up toward θ</text>
+      <text x="250" y="12" fontSize="9" fill="#888" textAnchor="middle">All paths revert to the long-run variance θ</text>
+      <text x="42" y="18" fontSize="8" fill="#888">v</text>
+      <text x="462" y="159" fontSize="9" fill="#888">t</text>
+    </svg>
+  );
+}
+function DiagramCorrelation() {
+  const neg=[],zero=[],pos=[];
+  for(let i=0;i<=60;i++){
+    const x=40+i*7, shock=Math.sin(i*0.6)*0.6+Math.sin(i*1.1)*0.3;
+    neg.push(`${x},${90-shock*18-(i*0.3)}`);
+    zero.push(`${x},${90-shock*18}`);
+    pos.push(`${x},${90-shock*18+(i*0.3)}`);
+  }
+  return (
+    <svg viewBox="0 0 500 150" style={{width:"100%",background:"#f8f8f8",borderRadius:8,marginBottom:14,border:"1px solid #e0e0e0"}}>
+      <line x1="40" y1="10" x2="40" y2="130" stroke="#bbb" strokeWidth="1"/>
+      <polyline points={neg.join(' ')} fill="none" stroke="#f87171" strokeWidth="2"/>
+      <polyline points={zero.join(' ')} fill="none" stroke="#aaa" strokeWidth="1.5" strokeDasharray="4 3"/>
+      <polyline points={pos.join(' ')} fill="none" stroke="#4ade80" strokeWidth="2"/>
+      <rect x="338" y="14" width="152" height="76" rx="4" fill="white" stroke="#ddd"/>
+      <line x1="346" y1="28" x2="368" y2="28" stroke="#f87171" strokeWidth="2"/>
+      <text x="373" y="32" fontSize="9" fill="#dc2626">ρ = −0.7 (typical equity)</text>
+      <line x1="346" y1="46" x2="368" y2="46" stroke="#aaa" strokeWidth="2" strokeDasharray="4 3"/>
+      <text x="373" y="50" fontSize="9" fill="#666">ρ = 0 (no correlation)</text>
+      <line x1="346" y1="64" x2="368" y2="64" stroke="#4ade80" strokeWidth="2"/>
+      <text x="373" y="68" fontSize="9" fill="#16a34a">ρ = +0.7 (some commodities)</text>
+      <text x="235" y="144" fontSize="9" fill="#888" textAnchor="middle">Negative ρ creates the left skew and volatility smile seen in equity markets</text>
+    </svg>
+  );
+}
+function DiagramVolSmile() {
+  const smile=[],flat=[];
+  for(let i=0;i<=60;i++){
+    const x=40+i*7, z=(i-30)/12;
+    smile.push(`${x},${110-40*z*z-5}`);
+    flat.push(`${x},${85}`);
+  }
+  return (
+    <svg viewBox="0 0 500 145" style={{width:"100%",background:"#f8f8f8",borderRadius:8,marginBottom:14,border:"1px solid #e0e0e0"}}>
+      <line x1="40" y1="15" x2="40" y2="120" stroke="#555" strokeWidth="1.5"/>
+      <line x1="35" y1="120" x2="465" y2="120" stroke="#555" strokeWidth="1.5"/>
+      <polyline points={flat.join(' ')} fill="none" stroke="#aaa" strokeWidth="1.5" strokeDasharray="5 3"/>
+      <polyline points={smile.join(' ')} fill="none" stroke="#4ade80" strokeWidth="2.5"/>
+      <line x1="250" y1="15" x2="250" y2="122" stroke="#f0c060" strokeWidth="1" strokeDasharray="4 3"/>
+      <text x="250" y="134" fontSize="9" fill="#7a6010" textAnchor="middle">ATM (K ≈ S)</text>
+      <text x="60" y="52" fontSize="9" fill="#16a34a">Deep OTM puts</text>
+      <text x="380" y="52" fontSize="9" fill="#16a34a">Deep OTM calls</text>
+      <text x="336" y="82" fontSize="9" fill="#aaa">BS: flat</text>
+      <text x="42" y="13" fontSize="8" fill="#555">Implied σ</text>
+      <text x="466" y="124" fontSize="9" fill="#555">K</text>
+      <text x="250" y="14" fontSize="9" fill="#888" textAnchor="middle">Heston generates the volatility smile naturally — BS cannot</text>
+    </svg>
+  );
+}
+function DiagramFeller() {
+  return (
+    <svg viewBox="0 0 500 110" style={{width:"100%",background:"#f8f8f8",borderRadius:8,marginBottom:14,border:"1px solid #e0e0e0"}}>
+      <rect x="20" y="20" width="215" height="70" rx="6" fill="rgba(74,222,128,0.1)" stroke="rgba(74,222,128,0.5)" strokeWidth="1.5"/>
+      <text x="127" y="44" fontSize="11" fill="#16a34a" textAnchor="middle" fontWeight="700">Feller condition satisfied</text>
+      <text x="127" y="64" fontSize="15" fill="#16a34a" textAnchor="middle" fontFamily="Georgia,serif">2κθ ≥ ξ²</text>
+      <text x="127" y="80" fontSize="9" fill="#16a34a" textAnchor="middle">variance stays strictly positive</text>
+      <rect x="265" y="20" width="215" height="70" rx="6" fill="rgba(248,113,113,0.08)" stroke="rgba(248,113,113,0.4)" strokeWidth="1.5"/>
+      <text x="372" y="44" fontSize="11" fill="#dc2626" textAnchor="middle" fontWeight="700">Feller condition violated</text>
+      <text x="372" y="64" fontSize="15" fill="#dc2626" textAnchor="middle" fontFamily="Georgia,serif">2κθ {"<"} ξ²</text>
+      <text x="372" y="80" fontSize="9" fill="#dc2626" textAnchor="middle">v can hit zero (truncation handles it)</text>
+    </svg>
+  );
+}
+
+// ── YouTube card ──────────────────────────────────────────────────────────────
+function YTCard({href,title}) {
+  const [h,setH]=useState(false);
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer" style={{display:"block",textDecoration:"none",marginBottom:18}}>
+      <div style={{display:"flex",alignItems:"center",gap:16,background:"#1a1a1a",borderRadius:8,padding:"14px 18px",opacity:h?.85:1,transition:"opacity 0.15s"}}
+        onMouseEnter={()=>setH(true)} onMouseLeave={()=>setH(false)}>
+        <div style={{width:44,height:44,borderRadius:"50%",background:"rgba(255,0,0,0.9)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+          <div style={{width:0,height:0,borderTop:"9px solid transparent",borderBottom:"9px solid transparent",borderLeft:"16px solid white",marginLeft:3}}/>
+        </div>
+        <div>
+          <div style={{fontSize:13,fontWeight:700,color:"#fff",marginBottom:3}}>{title}</div>
+          <div style={{fontSize:11,color:"rgba(255,255,255,0.4)"}}>youtube.com · Watch on YouTube ↗</div>
+        </div>
+      </div>
+    </a>
+  );
+}
+
+// ── Bookmark nav ──────────────────────────────────────────────────────────────
+function HeaderDrawer({tab,setTab}) {
+  const [open,setOpen]=useState(true);
+  const [anim,setAnim]=useState("");
+  const collapse=()=>{setAnim("bm-out");setTimeout(()=>{setOpen(false);setAnim("");},280);};
+  const expand=()=>{setOpen(true);setAnim("bm-in");};
+  return (
+    <div className="bookmark-panel">
+      {open&&(
+        <div className={`bookmark-body ${anim}`}>
+          <div style={{width:"100%",height:2,background:"linear-gradient(90deg,#f0c060,transparent)",borderRadius:1,marginBottom:2}}/>
+          <div style={{fontFamily:"Arial",fontSize:22,fontWeight:800,letterSpacing:"0.08em",color:GOLD,lineHeight:1,textAlign:"center"}}>MONTE<br/>CARLO</div>
+          <div style={{fontFamily:"Arial",fontSize:9,letterSpacing:"0.2em",color:"rgba(200,216,232,0.3)",textAlign:"center",marginBottom:2}}>HESTON · OPTION PRICER</div>
+          <div style={{width:"100%",height:1,background:"rgba(255,255,255,0.07)"}}/>
+          <div style={{display:"flex",flexDirection:"column",gap:6,width:"100%"}}>
+            <button className={`tab-btn ${tab==="pricer"?"active":""}`} style={{textAlign:"left",padding:"7px 10px",borderRadius:4}} onClick={()=>setTab("pricer")}>PRICER</button>
+            <button className={`tab-btn ${tab==="import"?"active":""}`} style={{textAlign:"left",padding:"7px 10px",borderRadius:4}} onClick={()=>setTab("import")}>IMPORT OPTION</button>
+            <button className={`tab-btn ${tab==="explainer"?"active":""}`} style={{textAlign:"left",padding:"7px 10px",borderRadius:4}} onClick={()=>setTab("explainer")}>HOW IT WORKS</button>
+          </div>
+          <div style={{width:"100%",height:1,background:"rgba(255,255,255,0.07)"}}/>
+          <div onClick={collapse} style={{fontSize:9,color:"rgba(255,255,255,0.2)",letterSpacing:"0.12em",cursor:"pointer",textAlign:"center"}}>◀ HIDE</div>
+        </div>
+      )}
+      {!open&&(
+        <div className="bookmark-tab" onClick={expand}>
+          <span style={{writingMode:"vertical-rl",letterSpacing:"0.15em",fontSize:10,color:GOLD}}>MONTE CARLO</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Presets ───────────────────────────────────────────────────────────────────
+const PRESETS = {
+  "ATM CALL":   {S:100,K:100,T:0.5,r:0.05,sigma:0.20,type:"call",kappa:2.0,theta:0.04,xi:0.3,rho:-0.7,n:1000,steps:100},
+  "DEEP OTM":   {S:100,K:130,T:0.25,r:0.05,sigma:0.25,type:"call",kappa:2.0,theta:0.06,xi:0.5,rho:-0.7,n:1000,steps:100},
+  "HIGH VOL":   {S:100,K:100,T:1.0,r:0.05,sigma:0.50,type:"call",kappa:1.5,theta:0.25,xi:0.8,rho:-0.5,n:1000,steps:100},
+  "PUT HEDGE":  {S:100,K:90,T:0.25,r:0.05,sigma:0.20,type:"put",kappa:3.0,theta:0.04,xi:0.4,rho:-0.8,n:1000,steps:100},
+  "LEAP":       {S:100,K:100,T:2.0,r:0.05,sigma:0.20,type:"call",kappa:1.0,theta:0.05,xi:0.3,rho:-0.6,n:1000,steps:200},
+};
+
+// ── Main App ──────────────────────────────────────────────────────────────────
+function App() {
+  const [tab,setTab]=useState("pricer");
+  const [params,setParams]=useState({S:100,K:100,T:0.5,r:0.05,sigma:0.20,type:"call",n:1000,steps:100,kappa:2.0,theta:0.04,xi:0.3,rho:-0.7});
+  const [result,setResult]=useState(null);
+  const [running,setRunning]=useState(false);
+  const pathRef=useRef(null), histRef=useRef(null);
+
+  // yfinance state
+  const [yfTicker,setYfTicker]=useState("AAPL");
+  const [yfStatus,setYfStatus]=useState("idle");
+  const [yfError,setYfError]=useState("");
+  const [yfStock,setYfStock]=useState(null);
+  const [yfChain,setYfChain]=useState(null);
+  const [yfExpiries,setYfExpiries]=useState([]);
+  const [yfSelectedExpiry,setYfSelectedExpiry]=useState("");
+  const [yfOptType,setYfOptType]=useState("calls");
+  const [yfSelectedOption,setYfSelectedOption]=useState(null);
+  const [showSetup,setShowSetup]=useState(false);
+  const [apiUrl,setApiUrl]=useState("http://localhost:5000");
+  const [apiTestMsg,setApiTestMsg]=useState("");
+  const API=apiUrl.replace(/\/$/,"");
+
+  const safeJson=async(res)=>{
+    const text=await res.text();
+    if(!text||text.trim()==="") throw new Error("Server returned an empty response.");
+    try{ return JSON.parse(text); }
+    catch(e){
+      const snippet=text.replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,200);
+      throw new Error(`Server returned non-JSON: "${snippet}"`);
+    }
+  };
+
+  const testApi=async()=>{
+    setApiTestMsg("testing…");
+    try{
+      const res=await fetch(`${API}/`);
+      const d=await safeJson(res);
+      setApiTestMsg(d.status==="ok"?"✅ Connected!":"⚠ Unexpected response");
+    }catch(e){ setApiTestMsg("❌ Cannot reach server"); }
+  };
+
+  const fetchStock=async(ticker)=>{
+    setYfStatus("loading"); setYfError(""); setYfChain(null); setYfSelectedOption(null);
+    try{
+      const [sRes,vRes]=await Promise.all([fetch(`${API}/api/stock?ticker=${ticker}`),fetch(`${API}/api/volatility?ticker=${ticker}`)]);
+      const sd=await safeJson(sRes), vd=await safeJson(vRes);
+      if(sd.error) throw new Error(sd.error);
+      setYfStock({...sd,annualVol:vd.annualVol||sd.sigma});
+      setYfStatus("ok");
+      return {...sd,annualVol:vd.annualVol};
+    }catch(e){
+      const msg=e.message;
+      setYfError(msg.includes("fetch")||msg.includes("NetworkError")||msg.includes("CORS")?"Cannot reach server. Check the API URL and that server.py is running.":msg);
+      setYfStatus("error"); return null;
+    }
+  };
+
+  const fetchChain=async(ticker,expiry,type)=>{
+    setYfStatus("loading"); setYfChain(null); setYfSelectedOption(null);
+    try{
+      const url=`${API}/api/options?ticker=${ticker}&type=${type}${expiry?`&expiry=${expiry}`:""}`;
+      const res=await fetch(url), data=await safeJson(res);
+      if(data.error) throw new Error(data.error);
+      setYfChain(data); setYfExpiries(data.expiries||[]); setYfSelectedExpiry(data.expiry); setYfStatus("ok");
+    }catch(e){
+      const msg=e.message;
+      setYfError(msg.includes("fetch")||msg.includes("NetworkError")?"Cannot reach server.":msg);
+      setYfStatus("error");
+    }
+  };
+
+  const importOption=(opt)=>{
+    if(!yfStock||!yfChain) return;
+    const now=new Date(), exp=new Date(yfChain.expiry);
+    const T=Math.max(0.01,(exp-now)/(365.25*24*3600*1000));
+    const sigma=opt.impliedVol>0.01?opt.impliedVol:(yfStock.annualVol||0.25);
+    setParams(p=>({...p,S:yfStock.price,K:opt.strike,T:parseFloat(T.toFixed(3)),sigma:parseFloat(sigma.toFixed(4)),type:yfOptType==="calls"?"call":"put"}));
+    setYfSelectedOption(opt); setTab("pricer"); setTimeout(run,80);
+  };
+
+  const set=(k,v)=>setParams(p=>({...p,[k]:v}));
+
+  const run=useCallback(()=>{
+    setRunning(true);
+    setTimeout(()=>{
+      const {S,K,T,r,sigma,n,steps,type,kappa,theta,xi,rho}=params;
+      const v0=sigma*sigma;
+      const {price,paths}=runHeston(S,K,T,r,v0,kappa,theta,xi,rho,n,steps,type);
+      const bs=blackScholes(S,K,T,r,sigma,type);
+      const finals=paths.map(p=>p[p.length-1]);
+      const sorted=[...finals].sort((a,b)=>a-b);
+      const mean=finals.reduce((a,b)=>a+b,0)/finals.length;
+      const std=Math.sqrt(finals.reduce((a,b)=>a+(b-mean)**2,0)/finals.length);
+      const mp=yfSelectedOption?((yfSelectedOption.bid+yfSelectedOption.ask)/2||yfSelectedOption.lastPrice):null;
+      setResult({price,bs,mean,std,paths,marketPrice:mp});
+      drawPaths(pathRef.current,paths,S,K,T,type,mp);
+      drawHistogram(histRef.current,paths,K,type);
+      setRunning(false);
+    },20);
+  },[params,yfSelectedOption]);
+
+  useEffect(()=>{run();},[]);
+  const applyPreset=name=>{const p=PRESETS[name];setParams(prev=>({...prev,...p}));setTimeout(run,50);};
+  const err=result?Math.abs(result.price-result.bs):null;
+
+  const sliders=[
+    {key:"S",     label:"SPOT PRICE",        min:1,    max:5000, step:1,     fmt:v=>`$${v}`},
+    {key:"K",     label:"STRIKE PRICE",       min:1,    max:5000, step:1,     fmt:v=>`$${v}`},
+    {key:"T",     label:"TIME TO EXPIRY",     min:0.01, max:10,   step:0.05,  fmt:v=>`${v.toFixed(2)}y`},
+    {key:"r",     label:"RISK-FREE RATE",     min:0,    max:0.30, step:0.005, fmt:v=>`${(v*100).toFixed(1)}%`},
+    {key:"sigma", label:"INITIAL VOL (σ₀)",  min:0.01, max:3.0,  step:0.01,  fmt:v=>`${(v*100).toFixed(0)}%`},
+    {key:"kappa", label:"MEAN REVERSION (κ)", min:0.1,  max:10,   step:0.1,   fmt:v=>v.toFixed(1)},
+    {key:"theta", label:"LONG-RUN VOL (θ)",   min:0.01, max:2.0,  step:0.01,  fmt:v=>`${(Math.sqrt(v)*100).toFixed(0)}%`},
+    {key:"xi",    label:"VOL OF VOL (ξ)",     min:0,    max:2.0,  step:0.01,  fmt:v=>v.toFixed(2)},
+    {key:"rho",   label:"CORRELATION (ρ)",    min:-0.99,max:0.99, step:0.01,  fmt:v=>v.toFixed(2)},
+    {key:"n",     label:"SIMULATIONS",        min:100,  max:20000,step:100,   fmt:v=>v.toLocaleString()},
+    {key:"steps", label:"TIME STEPS",         min:10,   max:500,  step:10,    fmt:v=>v},
+  ];
+
+  return (
+    <div style={{minHeight:"100vh",background:"#060810",color:"#c8d8e8",fontFamily:"Arial,sans-serif",display:"flex",flexDirection:"column",alignItems:"center",padding:"20px 20px 40px"}}>
+      <style>{`
+        *{box-sizing:border-box}
+        @keyframes bm-in{from{opacity:0;transform:translateX(-18px)}to{opacity:1;transform:translateX(0)}}
+        @keyframes bm-out{from{opacity:1;transform:translateX(0)}to{opacity:0;transform:translateX(-18px)}}
+        @keyframes bounce{0%,100%{transform:scale(1)}50%{transform:scale(1.18)}}
+        .bm-in{animation:bm-in .28s ease}
+        .bm-out{animation:bm-out .28s ease}
+        .bookmark-panel{position:fixed;left:0;top:50%;transform:translateY(-50%);z-index:100;display:flex;align-items:center}
+        .bookmark-body{background:#0d1420;border:1px solid rgba(255,255,255,0.09);border-left:none;border-radius:0 10px 10px 0;padding:18px 14px;display:flex;flex-direction:column;gap:10px;align-items:center;min-width:140px;box-shadow:4px 0 24px rgba(0,0,0,0.5)}
+        .bookmark-tab{background:#0d1420;border:1px solid rgba(255,255,255,0.09);border-left:none;border-radius:0 8px 8px 0;padding:18px 8px;cursor:pointer;display:flex;align-items:center;justify-content:center}
+        .tab-btn{background:transparent;border:1px solid rgba(255,255,255,0.07);color:rgba(200,216,232,0.5);font-family:Arial;font-size:10px;font-weight:700;letter-spacing:0.12em;cursor:pointer;transition:all .15s;width:100%}
+        .tab-btn:hover{background:rgba(255,255,255,0.05);color:rgba(200,216,232,0.8)}
+        .tab-btn.active{background:rgba(240,192,96,0.12);border-color:rgba(240,192,96,0.4);color:#f0c060}
+        .preset-btn{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);color:rgba(200,216,232,0.5);font-family:Arial;font-size:9px;font-weight:700;letter-spacing:0.1em;padding:5px 10px;border-radius:4px;cursor:pointer;transition:all .15s}
+        .preset-btn:hover{background:rgba(240,192,96,0.1);border-color:rgba(240,192,96,0.35);color:#f0c060}
+        .panel{background:#0d1218;border:1px solid rgba(255,255,255,0.06);border-radius:8px}
+        .stat-box{background:#0d1218;border:1px solid rgba(255,255,255,0.06);border-radius:6px;padding:10px 14px}
+        .label{font-size:9px;letter-spacing:0.12em;color:rgba(200,216,232,0.35);margin-bottom:4px}
+        .big-num{font-size:22px;font-weight:700;letter-spacing:0.02em;line-height:1}
+        .run-btn{background:rgba(240,192,96,0.15);border:1px solid rgba(240,192,96,0.4);color:#f0c060;font-family:Arial;font-size:11px;font-weight:700;letter-spacing:0.12em;padding:10px 20px;border-radius:6px;cursor:pointer;transition:all .15s}
+        .run-btn:hover:not(:disabled){background:rgba(240,192,96,0.25)}
+        .run-btn:disabled{opacity:0.4;cursor:not-allowed}
+        .type-btn{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);color:rgba(200,216,232,0.5);font-family:Arial;font-size:10px;font-weight:700;letter-spacing:0.1em;padding:6px 16px;border-radius:4px;cursor:pointer;transition:all .15s;flex:1}
+        .type-btn:hover{background:rgba(255,255,255,0.07)}
+        .type-btn.ac{background:rgba(74,222,128,0.15);border-color:rgba(74,222,128,0.5);color:#4ade80}
+        .type-btn.ap{background:rgba(248,113,113,0.15);border-color:rgba(248,113,113,0.5);color:#f87171}
+        input[type=range]{width:100%;accent-color:#f0c060;height:3px}
+        .chain-row{cursor:pointer;transition:background .12s}
+        .chain-row:hover{background:rgba(255,255,255,0.05)!important}
+        .chain-row.selected{background:rgba(240,192,96,0.08)!important;border-left:2px solid rgba(240,192,96,0.6)}
+        .explainer-wrap{width:100%;background:#fff}
+        .explainer-inner{width:100%;max-width:800px;margin:0 auto;padding:32px 24px 56px}
+        .explainer-section{margin-bottom:44px}
+        .explainer-section h2{font-family:Arial;font-weight:700;font-size:22px;letter-spacing:0.05em;color:#1a1a1a;margin:0 0 14px 0;border-bottom:2px solid rgba(0,0,0,0.08);padding-bottom:8px}
+        .explainer-section p{font-size:15px;line-height:1.9;color:#2a2a2a;margin:0 0 14px 0}
+        .explainer-section strong{color:#111;font-weight:700}
+        .note{background:#fffbeb;border-left:3px solid #f0c060;border-radius:0 6px 6px 0;padding:12px 16px;font-size:13px;color:#555;line-height:1.7;margin:14px 0}
+      `}</style>
+
+      <HeaderDrawer tab={tab} setTab={setTab}/>
+
+      {/* ── PRICER TAB ── */}
+      {tab==="pricer" && (
+        <div style={{display:"flex",flexDirection:"column",gap:12,width:"100%",maxWidth:1400}}>
+
+          {/* Preset buttons */}
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            {Object.keys(PRESETS).map(name=><button key={name} className="preset-btn" onClick={()=>applyPreset(name)}>{name}</button>)}
+          </div>
+
+          {/* Controls bar */}
+          <div className="panel" style={{padding:"16px 20px"}}>
+            <div style={{display:"flex",gap:20,flexWrap:"wrap",alignItems:"flex-end"}}>
+              <div>
+                <div className="label" style={{marginBottom:6}}>OPTION TYPE</div>
+                <div style={{display:"flex",gap:8}}>
+                  <button className={`type-btn ${params.type==="call"?"ac":""}`} onClick={()=>set("type","call")}>CALL</button>
+                  <button className={`type-btn ${params.type==="put"?"ap":""}`} onClick={()=>set("type","put")}>PUT</button>
+                </div>
+              </div>
+              {sliders.map(({key,label,min,max,step,fmt})=>(
+                <div key={key} style={{flex:"1 1 120px",minWidth:120,maxWidth:190}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                    <span className="label">{label}</span>
+                    <span style={{fontSize:11,color:GOLD}}>{fmt(params[key])}</span>
+                  </div>
+                  <input type="range" min={min} max={max} step={step} value={params[key]} onChange={e=>set(key,parseFloat(e.target.value))} style={{width:"100%"}}/>
+                </div>
+              ))}
+              <button className="run-btn" style={{flexShrink:0}} onClick={run} disabled={running}>
+                {running?"RUNNING…":"▶ SIMULATE"}
+              </button>
+            </div>
+          </div>
+
+          {/* Chart */}
+          <div className="panel" style={{overflow:"hidden"}}>
+            <div style={{padding:"10px 16px 8px",borderBottom:"1px solid rgba(255,255,255,0.05)",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontSize:10,letterSpacing:"0.12em",color:"rgba(200,216,232,0.4)"}}>HESTON MODEL — SIMULATED PRICE PATHS</span>
+              <div style={{display:"flex",gap:14,fontSize:9,color:"rgba(200,216,232,0.3)"}}>
+                <span><span style={{color:GREEN}}>■</span> ITM paths</span>
+                <span><span style={{color:RED}}>■</span> OTM paths</span>
+                <span style={{color:"rgba(200,216,232,0.35)"}}>··· median</span>
+                <span style={{color:GOLD}}>— K strike</span>
+              </div>
+            </div>
+            <canvas ref={pathRef} width={CW} height={CH} style={{display:"block",width:"100%",height:"auto"}}/>
+          </div>
+
+          {/* Stats */}
+          {result && (
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <div className="stat-box" style={{borderColor:"rgba(240,192,96,0.35)",flex:1,minWidth:110}}>
+                <div className="label">HESTON MC</div>
+                <div className="big-num" style={{color:GOLD}}>${result.price.toFixed(3)}</div>
+                <div style={{fontSize:9,color:"rgba(200,216,232,0.25)",marginTop:3}}>stochastic vol</div>
+              </div>
+              {result.marketPrice>0&&(
+                <div className="stat-box" style={{borderColor:"rgba(96,165,250,0.35)",flex:1,minWidth:110}}>
+                  <div className="label">MARKET MID</div>
+                  <div className="big-num" style={{color:"#60a5fa"}}>${result.marketPrice.toFixed(3)}</div>
+                  <div style={{fontSize:9,color:"rgba(200,216,232,0.25)",marginTop:3}}>bid/ask midpoint</div>
+                </div>
+              )}
+              <div className="stat-box" style={{flex:1,minWidth:110}}>
+                <div className="label">BLACK-SCHOLES</div>
+                <div className="big-num" style={{color:"rgba(200,216,232,0.6)"}}>${result.bs.toFixed(3)}</div>
+                <div style={{fontSize:9,color:"rgba(200,216,232,0.25)",marginTop:3}}>constant vol benchmark</div>
+              </div>
+              <div className="stat-box" style={{flex:1,minWidth:110}}>
+                <div className="label">HESTON vs BS</div>
+                <div className="big-num" style={{color:err<0.05?GREEN:err<0.2?GOLD:RED}}>${err.toFixed(3)}</div>
+              </div>
+              {result.marketPrice>0&&(
+                <div className="stat-box" style={{borderColor:"rgba(96,165,250,0.2)",flex:1,minWidth:110}}>
+                  <div className="label">MC vs MARKET</div>
+                  <div className="big-num" style={{color:Math.abs(result.price-result.marketPrice)<0.5?GREEN:GOLD}}>
+                    ${Math.abs(result.price-result.marketPrice).toFixed(3)}
+                  </div>
+                </div>
+              )}
+              <div className="stat-box" style={{flex:1,minWidth:110}}>
+                <div className="label">MEAN Sₜ</div>
+                <div className="big-num" style={{color:"rgba(200,216,232,0.55)"}}>${result.mean.toFixed(2)}</div>
+              </div>
+              <div className="stat-box" style={{flex:1,minWidth:110}}>
+                <div className="label">STD DEV Sₜ</div>
+                <div className="big-num" style={{color:"rgba(200,216,232,0.55)"}}>${result.std.toFixed(2)}</div>
+              </div>
+            </div>
+          )}
+
+          {/* Histogram */}
+          <div className="panel" style={{overflow:"hidden"}}>
+            <div style={{padding:"8px 16px 6px",borderBottom:"1px solid rgba(255,255,255,0.05)"}}>
+              <span style={{fontSize:10,letterSpacing:"0.12em",color:"rgba(200,216,232,0.4)"}}>TERMINAL PRICE DISTRIBUTION</span>
+            </div>
+            <canvas ref={histRef} width={CW} height={130} style={{display:"block",width:"100%",height:"auto"}}/>
+          </div>
+
+          {/* Greeks */}
+          {result && (()=>{
+            const {S,K,T,r,sigma}=params;
+            if(T<=0) return null;
+            const d1=(Math.log(S/K)+(r+0.5*sigma*sigma)*T)/(sigma*Math.sqrt(T));
+            const d2=d1-sigma*Math.sqrt(T);
+            const nd1=normCDF(d1);
+            const phi=Math.exp(-(d1*d1)/2)/Math.sqrt(2*Math.PI);
+            const delta=params.type==="call"?nd1:nd1-1;
+            const gamma=phi/(S*sigma*Math.sqrt(T));
+            const vega=S*phi*Math.sqrt(T)/100;
+            const theta_g=params.type==="call"
+              ?(-S*phi*sigma/(2*Math.sqrt(T))-r*K*Math.exp(-r*T)*normCDF(d2))/365
+              :(-S*phi*sigma/(2*Math.sqrt(T))+r*K*Math.exp(-r*T)*normCDF(-d2))/365;
+            const rho_g=params.type==="call"?K*T*Math.exp(-r*T)*normCDF(d2)/100:-K*T*Math.exp(-r*T)*normCDF(-d2)/100;
+            const greeks=[
+              {name:"Δ Delta",val:delta.toFixed(4),desc:"Price change per $1 move in S"},
+              {name:"Γ Gamma",val:gamma.toFixed(4),desc:"Delta change per $1 move in S"},
+              {name:"ν Vega", val:vega.toFixed(4), desc:"Price change per 1% move in σ"},
+              {name:"Θ Theta",val:theta_g.toFixed(4),desc:"Price decay per calendar day"},
+              {name:"ρ Rho",  val:rho_g.toFixed(4), desc:"Price change per 1% move in r"},
+            ];
+            return (
+              <div className="panel" style={{padding:"16px 20px"}}>
+                <div style={{fontSize:10,letterSpacing:"0.12em",color:"rgba(200,216,232,0.35)",marginBottom:12}}>GREEKS — ANALYTICAL (BLACK-SCHOLES)</div>
+                <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+                  {greeks.map(g=>(
+                    <div key={g.name} style={{flex:"1 1 130px",minWidth:130,borderLeft:"2px solid rgba(240,192,96,0.25)",paddingLeft:10}}>
+                      <div style={{fontSize:13,fontWeight:700,color:GOLD,marginBottom:2}}>{g.name}</div>
+                      <div style={{fontSize:18,fontWeight:700,color:"#c8d8e8",marginBottom:2}}>{g.val}</div>
+                      <div style={{fontSize:10,color:"rgba(200,216,232,0.35)",lineHeight:1.5}}>{g.desc}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* ── IMPORT OPTION TAB ── */}
+      {tab==="import" && (
+        <div style={{width:"100%",maxWidth:1400,display:"flex",flexDirection:"column",gap:16}}>
+          <div className="panel" style={{padding:"20px 24px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+              <span style={{fontSize:10,letterSpacing:"0.12em",color:"rgba(200,216,232,0.4)"}}>IMPORT REAL OPTION DATA</span>
+              <button onClick={()=>setShowSetup(v=>!v)} style={{background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",color:"rgba(200,216,232,0.5)",borderRadius:"50%",width:24,height:24,cursor:"pointer",fontSize:12,fontWeight:700}}>?</button>
+            </div>
+
+            {showSetup&&(
+              <div style={{background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.07)",borderRadius:8,padding:"20px",marginBottom:20}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+                  <span style={{fontSize:13,fontWeight:700,color:"#c8d8e8",letterSpacing:"0.06em"}}>SETUP GUIDE</span>
+                  <button onClick={()=>setShowSetup(false)} style={{background:"none",border:"none",color:"rgba(200,216,232,0.4)",cursor:"pointer",fontSize:16}}>×</button>
+                </div>
+                {[
+                  ["1","Check Python","Make sure Python 3 is installed: python --version. Download from python.org if needed."],
+                  ["2","Place files","Put server.py, requirements.txt, and Procfile in a folder on your computer."],
+                  ["3","Install deps","In a terminal: pip install flask flask-cors yfinance numpy gunicorn"],
+                  ["4","Navigate","Mac: cd ~/path/to/folder  |  Windows: cd C:\\path\\to\\folder"],
+                  ["5","Start server","Run: python server.py — you should see 'running on http://localhost:5000'"],
+                  ["6","Open HTML","Open monte-carlo.html in your browser. The API URL below should read http://localhost:5000"],
+                  ["7","Import option","Fetch a ticker, choose an expiry, load the chain, click a row to import"],
+                ].map(([n,title,desc])=>(
+                  <div key={n} style={{display:"flex",gap:14,marginBottom:14}}>
+                    <span style={{background:"rgba(74,222,128,0.2)",color:GREEN,borderRadius:"50%",width:24,height:24,display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,flexShrink:0}}>{n}</span>
+                    <div>
+                      <div style={{fontSize:13,fontWeight:700,color:"#c8d8e8",marginBottom:3}}>{title}</div>
+                      <div style={{fontSize:12,color:"rgba(200,216,232,0.5)",lineHeight:1.7}}>{desc}</div>
+                    </div>
+                  </div>
+                ))}
+                <div style={{borderTop:"1px solid rgba(255,255,255,0.07)",paddingTop:14,marginTop:4}}>
+                  <div style={{fontSize:12,fontWeight:700,color:GOLD,marginBottom:6}}>☁ CLOUD DEPLOY (Railway)</div>
+                  <div style={{fontSize:12,color:"rgba(200,216,232,0.5)",lineHeight:1.75}}>
+                    A. Push server.py, requirements.txt, Procfile to a GitHub repo.<br/>
+                    B. Go to <a href="https://railway.app" target="_blank" rel="noopener noreferrer" style={{color:GOLD}}>railway.app</a>, create a new project from GitHub, deploy.<br/>
+                    C. Copy the Railway URL and paste it into the API URL field below.
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* API URL */}
+            <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:18,flexWrap:"wrap"}}>
+              <div style={{fontSize:10,letterSpacing:"0.1em",color:"rgba(200,216,232,0.35)",flexShrink:0}}>API URL</div>
+              <input value={apiUrl} onChange={e=>setApiUrl(e.target.value)}
+                style={{flex:1,minWidth:200,background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:4,padding:"6px 10px",color:"#c8d8e8",fontFamily:"monospace",fontSize:12}}/>
+              <button onClick={testApi} style={{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.12)",color:"rgba(200,216,232,0.7)",padding:"6px 14px",borderRadius:4,cursor:"pointer",fontSize:11,fontWeight:700,letterSpacing:"0.08em"}}>TEST</button>
+              {apiTestMsg&&<span style={{fontSize:11,color:apiTestMsg.includes("✅")?"#4ade80":apiTestMsg.includes("testing")?"#f0c060":"#f87171"}}>{apiTestMsg}</span>}
+              <span style={{fontSize:10,color:apiUrl.startsWith("https")?"#4ade80":"rgba(200,216,232,0.25)"}}>
+                {apiUrl.startsWith("https")?"☁ cloud":"⬡ local"}
+              </span>
+            </div>
+
+            {/* Ticker search */}
+            <div style={{display:"flex",gap:10,alignItems:"flex-end",flexWrap:"wrap",marginBottom:16}}>
+              <div style={{flex:"1 1 160px",minWidth:140}}>
+                <div className="label" style={{marginBottom:4}}>TICKER</div>
+                <input value={yfTicker} onChange={e=>setYfTicker(e.target.value.toUpperCase())}
+                  onKeyDown={e=>e.key==="Enter"&&fetchStock(yfTicker)}
+                  style={{width:"100%",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:4,padding:"8px 10px",color:"#c8d8e8",fontFamily:"monospace",fontSize:13,letterSpacing:"0.06em"}}/>
+              </div>
+              <button onClick={()=>fetchStock(yfTicker)} disabled={yfStatus==="loading"}
+                style={{background:"rgba(240,192,96,0.12)",border:"1px solid rgba(240,192,96,0.35)",color:GOLD,padding:"8px 20px",borderRadius:4,cursor:"pointer",fontSize:11,fontWeight:700,letterSpacing:"0.1em"}}>
+                {yfStatus==="loading"?"FETCHING…":"🔍 FETCH"}
+              </button>
+              {yfStock&&<div style={{fontSize:13,color:"rgba(200,216,232,0.7)"}}>{yfStock.name} · <span style={{color:GREEN,fontWeight:700}}>${yfStock.price}</span> · vol: <span style={{color:GOLD}}>{(yfStock.annualVol*100).toFixed(1)}%</span></div>}
+            </div>
+
+            {yfError&&<div style={{background:"rgba(248,113,113,0.1)",border:"1px solid rgba(248,113,113,0.3)",borderRadius:6,padding:"10px 14px",fontSize:12,color:"#f87171",marginBottom:12}}>{yfError}</div>}
+
+            {/* Chain controls */}
+            {yfStock&&(
+              <div style={{display:"flex",gap:10,alignItems:"flex-end",flexWrap:"wrap",marginBottom:16}}>
+                <div style={{flex:"1 1 180px",minWidth:160}}>
+                  <div className="label" style={{marginBottom:4}}>EXPIRY</div>
+                  <select value={yfSelectedExpiry} onChange={e=>setYfSelectedExpiry(e.target.value)}
+                    style={{width:"100%",background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:4,padding:"7px 10px",color:"#c8d8e8",fontSize:12}}>
+                    {yfExpiries.map(e=><option key={e} value={e}>{e}</option>)}
+                  </select>
+                </div>
+                <div style={{display:"flex",gap:6}}>
+                  {["calls","puts"].map(t=>(
+                    <button key={t} onClick={()=>setYfOptType(t)}
+                      style={{background:yfOptType===t?"rgba(240,192,96,0.15)":"rgba(255,255,255,0.04)",border:`1px solid ${yfOptType===t?"rgba(240,192,96,0.4)":"rgba(255,255,255,0.08)"}`,color:yfOptType===t?GOLD:"rgba(200,216,232,0.5)",padding:"7px 16px",borderRadius:4,cursor:"pointer",fontSize:11,fontWeight:700,letterSpacing:"0.08em"}}>
+                      {t.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+                <button onClick={()=>fetchChain(yfTicker,yfSelectedExpiry,yfOptType)} disabled={yfStatus==="loading"}
+                  style={{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.12)",color:"rgba(200,216,232,0.7)",padding:"7px 18px",borderRadius:4,cursor:"pointer",fontSize:11,fontWeight:700,letterSpacing:"0.08em"}}>
+                  {yfStatus==="loading"?"LOADING…":"LOAD CHAIN"}
+                </button>
+              </div>
+            )}
+
+            {/* Option chain table */}
+            {yfChain&&(
+              <div>
+                <div style={{fontSize:9,letterSpacing:"0.12em",color:"rgba(200,216,232,0.3)",marginBottom:8}}>
+                  {yfChain.type.toUpperCase()} · {yfChain.expiry} · {yfChain.options.length} STRIKES — click any row to import
+                </div>
+                <div style={{overflowX:"auto"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                    <thead>
+                      <tr style={{borderBottom:"1px solid rgba(255,255,255,0.08)"}}>
+                        {["Strike","Last","Bid","Ask","IV","Volume","OI","ITM"].map(h=>(
+                          <th key={h} style={{padding:"6px 10px",textAlign:"right",fontSize:9,letterSpacing:"0.1em",color:"rgba(200,216,232,0.35)",fontWeight:700}}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {yfChain.options.map((opt,i)=>{
+                        const sel=yfSelectedOption&&yfSelectedOption.strike===opt.strike;
+                        return (
+                          <tr key={i} className={`chain-row ${sel?"selected":""}`} onClick={()=>importOption(opt)}
+                            style={{borderBottom:"1px solid rgba(255,255,255,0.04)",background:opt.inTheMoney?"rgba(74,222,128,0.03)":"transparent"}}>
+                            <td style={{padding:"7px 10px",textAlign:"right",fontWeight:700,color:opt.inTheMoney?GREEN:"rgba(200,216,232,0.7)"}}>${opt.strike}</td>
+                            <td style={{padding:"7px 10px",textAlign:"right",color:"rgba(200,216,232,0.6)"}}>${opt.lastPrice.toFixed(2)}</td>
+                            <td style={{padding:"7px 10px",textAlign:"right",color:"rgba(200,216,232,0.6)"}}>${opt.bid.toFixed(2)}</td>
+                            <td style={{padding:"7px 10px",textAlign:"right",color:"rgba(200,216,232,0.6)"}}>${opt.ask.toFixed(2)}</td>
+                            <td style={{padding:"7px 10px",textAlign:"right",color:GOLD}}>{(opt.impliedVol*100).toFixed(1)}%</td>
+                            <td style={{padding:"7px 10px",textAlign:"right",color:"rgba(200,216,232,0.5)"}}>{opt.volume.toLocaleString()}</td>
+                            <td style={{padding:"7px 10px",textAlign:"right",color:"rgba(200,216,232,0.5)"}}>{opt.openInterest.toLocaleString()}</td>
+                            <td style={{padding:"7px 10px",textAlign:"right",color:opt.inTheMoney?GREEN:RED}}>{opt.inTheMoney?"✓":"–"}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── HOW IT WORKS TAB ── */}
+      {tab==="explainer" && (
+        <div className="explainer-wrap">
+        <div className="explainer-inner">
+
+          <div className="explainer-section">
+            <h2>01 · Why Constant Volatility is a Lie</h2>
+            <p>Black-Scholes prices options by assuming volatility is a fixed constant — the same number today, tomorrow, and in a year. But anyone who has watched markets knows this isn't true. Volatility <em>spikes</em> during crises, <em>clusters</em> in regimes, and slowly <em>drifts</em> back toward calmer levels.</p>
+            <p>The evidence is visible in the options market itself. If Black-Scholes were correct, then all options on the same stock — regardless of their strike price — should imply the same volatility. They don't. Plot the implied volatility of options across strikes and you get a curve, not a flat line. Traders call it the <strong>volatility smile</strong> (or smirk, or skew). Black-Scholes has no explanation for it.</p>
+            <DiagramVolSmile/>
+            <p>The Heston model (1993) fixes this at the root. Instead of a fixed σ, it lets volatility itself be random — following its own process, correlated with the stock. The result is a model that naturally produces fat tails, skew, and the smile without any tricks.</p>
+            <div style={{background:"#fff8e7",border:"1px solid #f0d080",borderRadius:8,padding:"16px",margin:"18px 0"}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+                <div>
+                  <div style={{fontSize:12,fontWeight:700,color:"#92400e",marginBottom:8}}>BLACK-SCHOLES ASSUMES</div>
+                  {["σ is constant forever","Flat implied vol across all strikes","Stock returns are perfectly normal","No volatility clustering or regimes"].map((t,i)=>(
+                    <div key={i} style={{fontSize:13,color:"#dc2626",marginBottom:4}}>✗ {t}</div>
+                  ))}
+                </div>
+                <div>
+                  <div style={{fontSize:12,fontWeight:700,color:"#166534",marginBottom:8}}>HESTON ALLOWS</div>
+                  {["σ evolves randomly over time","Curved implied vol surface (smile)","Heavier tails and skewed distribution","Vol spikes, clusters, and mean-reverts"].map((t,i)=>(
+                    <div key={i} style={{fontSize:13,color:"#16a34a",marginBottom:4}}>✓ {t}</div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="explainer-section">
+            <h2>02 · Two Things Evolving Together</h2>
+            <p>The core idea of Heston is simple: instead of one equation describing how a stock moves, you have <em>two equations running simultaneously</em>. The stock price S and its variance v are both random, and they're <strong>connected</strong> — they influence each other at every moment in time.</p>
+            <p>Think of it like two people walking, where one person's stumble makes the other more likely to stumble too. The stock and its volatility are like that.</p>
+            <Formula tex="dS_t = r S_t \, dt + \sqrt{v_t} \; S_t \; dW_t^S" note="The stock equation: drift (r) plus a random shock scaled by √v — so when variance is high, the stock moves more wildly"/>
+            <Formula tex="dv_t = \kappa(\theta - v_t)\,dt + \xi\sqrt{v_t}\,dW_t^v" note="The variance equation: it gets pulled back toward θ (mean reversion), but also gets its own random pushes"/>
+            <Formula tex="\operatorname{corr}(dW^S,\, dW^v) = \rho" note="The crucial link: the two random processes share a correlation ρ. This is what creates skew in the distribution"/>
+            <DiagramHestonPaths/>
+            <div className="note">Notice how the two panels are linked: when the variance (pink, bottom) spikes up, the price (black, top) starts moving more dramatically in that same period. This is the coupling in action.</div>
+          </div>
+
+          <div className="explainer-section">
+            <h2>03 · Variance is Pulled Back to Earth (κ and θ)</h2>
+            <p>Stock prices can drift in any direction indefinitely — there's no force pulling them back. But volatility doesn't work that way. It spikes and then it calms. It has a <em>home</em>.</p>
+            <p>In Heston, the variance process has a built-in gravitational pull toward a long-run level θ (theta). The strength of that pull is controlled by κ (kappa). This property is called <strong>mean reversion</strong>.</p>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,margin:"18px 0"}}>
+              <div style={{background:"#fff8e7",border:"1px solid #f0d080",borderRadius:8,padding:"16px"}}>
+                <div style={{background:"#92400e",color:"#fff",borderRadius:4,padding:"3px 10px",fontSize:12,fontWeight:700,display:"inline-block",marginBottom:8}}>κ (kappa) — Speed of pull</div>
+                <p style={{fontSize:13,margin:0}}>How quickly variance snaps back toward θ. A high κ means any spike is short-lived — variance gets yanked back fast. A low κ means vol can stay elevated for months. For S&P 500 options, κ is typically calibrated to somewhere between 1 and 3.</p>
+              </div>
+              <div style={{background:"#f0fdf4",border:"1px solid #86efac",borderRadius:8,padding:"16px"}}>
+                <div style={{background:"#166534",color:"#fff",borderRadius:4,padding:"3px 10px",fontSize:12,fontWeight:700,display:"inline-block",marginBottom:8}}>θ (theta) — The home level</div>
+                <p style={{fontSize:13,margin:0}}>The long-run variance that the process gravitates toward. Shown in the pricer as an equivalent volatility (√θ). For large equity indices, this is often around 15–25% annualised vol. If you leave the model running for a long time, variance will cluster near θ regardless of where it started.</p>
+              </div>
+            </div>
+            <DiagramMeanReversion/>
+            <div className="note">Try moving σ₀ (initial vol) far from √θ in the pricer. The paths will start with very different behaviour at the left, but gradually converge toward a similar spread by expiry. That convergence is mean reversion at work.</div>
+          </div>
+
+          <div className="explainer-section">
+            <h2>04 · How Uncertain is the Uncertainty? (ξ and the Smile)</h2>
+            <p>If κ and θ describe where variance goes on average, ξ (xi, "vol of vol") describes how <em>erratically</em> it gets there. A high ξ means variance itself jumps around wildly — it might spike to twice θ, or collapse to near zero, before eventually reverting.</p>
+            <Formula tex="\xi \sqrt{v_t} \; dW_t^v" note="The random term in the variance equation — ξ controls the size of the pushes, while √v_t ensures they scale appropriately with the current level of variance"/>
+            <p>This parameter is the main driver of the volatility smile. When ξ is zero, the model collapses back to Black-Scholes with constant vol. As ξ increases, the distribution of terminal stock prices gets fatter tails — and those fat tails show up as elevated implied vol on deep OTM options.</p>
+            <div className="note">Set ξ = 0 in the pricer and watch what happens to the HESTON vs BS gap — it should collapse toward zero because you've turned off stochastic volatility entirely. Then slowly raise ξ and watch the divergence grow as the model generates increasingly non-normal distributions.</div>
+          </div>
+
+          <div className="explainer-section">
+            <h2>05 · The Correlation That Creates Skew (ρ)</h2>
+            <p>Of all the Heston parameters, ρ (rho — not to be confused with the Greek) is the most important for reproducing what real equity markets look like. It controls the <em>correlation between the stock's random moves and variance's random moves</em>.</p>
+            <p>For equities, this correlation is almost always <strong>negative</strong> — typically between −0.5 and −0.8. This encodes something traders have observed for decades: when the stock falls hard, volatility tends to spike simultaneously. This is called the <strong>leverage effect</strong>.</p>
+            <DiagramCorrelation/>
+            <p>Negative ρ has a direct consequence for option pricing. It makes the left tail of the stock's distribution heavier than the right — the stock can crash faster than it can rally. OTM put options, which pay off in a crash, become more valuable. This is exactly the skew traders pay for when buying downside protection.</p>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,margin:"18px 0"}}>
+              {[
+                {lbl:"ρ = −0.7",who:"Typical equity index",desc:"Negative skew. Left tail is fat. OTM puts are expensive relative to BS."},
+                {lbl:"ρ = 0",who:"Symmetric model",desc:"No skew — just a smile from ξ. Both tails are equally fat."},
+                {lbl:"ρ = +0.7",who:"Some commodities & crypto",desc:"Positive skew. Right tail is fat. OTM calls carry the premium."}
+              ].map(({lbl,who,desc},i)=>(
+                <div key={i} style={{background:"#fff8e7",border:"1px solid #e8d080",borderRadius:8,padding:"14px"}}>
+                  <div style={{fontSize:14,fontWeight:700,color:"#92400e",fontFamily:"Georgia,serif",marginBottom:4}}>{lbl}</div>
+                  <div style={{fontSize:11,fontWeight:700,color:"#555",marginBottom:6}}>{who}</div>
+                  <div style={{fontSize:12,color:"#444",lineHeight:1.6}}>{desc}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="explainer-section">
+            <h2>06 · Running the Simulation</h2>
+            <p>A computer can't work with infinitely small time slices, so we chop the life of the option into many discrete steps. At each step, we generate two random numbers, connect them via ρ, and update both S and v simultaneously.</p>
+            <Formula tex="v_{t+\Delta t} = \max\!\bigl(v_t + \kappa(\theta - v_t)\Delta t + \xi\sqrt{v_t}\,\sqrt{\Delta t}\;Z_v,\; 0\bigr)" note="Update variance — then clamp to zero if it goes negative. This 'full truncation' prevents the square root from breaking."/>
+            <Formula tex="S_{t+\Delta t} = S_t \cdot \exp\!\left[\left(r - \tfrac{1}{2}v_t\right)\Delta t + \sqrt{v_t \cdot \Delta t}\;Z_S\right]" note="Update stock price using the exponential (log-Euler) scheme — ensures S stays positive"/>
+            <Formula tex="Z_S = Z_1, \qquad Z_v = \rho\, Z_1 + \sqrt{1-\rho^2}\; Z_2" note="Z₁ and Z₂ are independent standard normals — this construction (Cholesky) gives them exactly the desired correlation ρ"/>
+            <p>Repeat this for every time step, for every simulation path, and you end up with thousands of possible futures. Average the payoffs across all of them and discount back to today — that's the Heston option price.</p>
+            <div className="note">The clamping (max(v, 0)) is called the <strong>full truncation scheme</strong>. It's a pragmatic fix: the continuous Heston process can theoretically never go negative, but the discrete approximation can. Clamping keeps everything stable and is standard practice in the industry.</div>
+          </div>
+
+          <div className="explainer-section">
+            <h2>07 · The Feller Condition</h2>
+            <p>There's a mathematical condition that tells you whether the continuous Heston variance process will ever touch zero. It involves all three variance parameters:</p>
+            <DiagramFeller/>
+            <p>When 2κθ ≥ ξ², the process is "well-behaved" — variance is always pushed away from zero before it can hit it. When this is violated, zero is reachable. In the discrete simulation we handle this with truncation regardless, but violating Feller noticeably affects the behaviour of paths.</p>
+            <div className="note">Try it: set κ = 0.5, θ = 0.02, ξ = 1.5 (violating Feller badly). You'll see paths periodically lock into straight lines — that's variance stuck at zero, meaning no randomness in the stock for those steps. This is unphysical and a sign the calibration is poor.</div>
+          </div>
+
+          <div className="explainer-section">
+            <h2>08 · Comparing the Models</h2>
+            <p>The Heston MC price in the top-left stat box and the Black-Scholes price next to it will often differ. This difference isn't error — it's the models <em>genuinely disagreeing</em> about what the option is worth, because they make different assumptions about the world.</p>
+            <div style={{background:"#fff8e7",border:"1px solid #f0d080",borderRadius:8,padding:"16px",margin:"18px 0"}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:14}}>
+                {[
+                  {lbl:"GBM Monte Carlo",col:"#0984e3",items:["Constant σ throughout","Log-normal terminal prices","Fast simulation","No vol smile/skew","Converges exactly to BS"]},
+                  {lbl:"Black-Scholes",col:"#7c3aed",items:["Constant σ throughout","Closed-form exact answer","Instant, no sampling noise","Greeks in a single line","One vol for all strikes"]},
+                  {lbl:"Heston MC (this model)",col:"#d97706",items:["σ evolves randomly","Skewed, fat-tailed prices","Slower (two SDEs per step)","Generates the vol smile","Needs all 5 params calibrated"]}
+                ].map(({lbl,col,items},i)=>(
+                  <div key={i}>
+                    <div style={{fontSize:12,fontWeight:700,color:col,marginBottom:8,borderBottom:`2px solid ${col}`,paddingBottom:4}}>{lbl}</div>
+                    {items.map((t,j)=><div key={j} style={{fontSize:12,color:"#333",marginBottom:5}}>· {t}</div>)}
+                  </div>
+                ))}
+              </div>
+            </div>
+            <p>The ultimate test: set ξ = 0 in the pricer. With no vol-of-vol, Heston's variance is deterministic and the model collapses to GBM. The HESTON vs BS number should approach zero — only sampling noise remains. This is a good sanity check that the simulation is working correctly.</p>
+          </div>
+
+        </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
