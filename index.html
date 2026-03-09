@@ -505,7 +505,92 @@ function HeaderDrawer({tab,setTab}) {
   );
 }
 
-// ── URL validator (module-level so it can be called before App renders) ───────
+// ── Setup guide component (needs useState — must be a real component) ─────────
+function SetupGuide({onClose}) {
+  const [mode,setMode]=useState("local");
+  const localSteps=[
+    {n:"1",col:"#60a5fa",title:"Check Python is installed",
+      body:<>Open a terminal and run <Code>python --version</Code> or <Code>python3 --version</Code>. You need Python 3.8 or newer. If you don't have it, download it from <a href="https://python.org" target="_blank" rel="noopener noreferrer" style={{color:GOLD}}>python.org</a> — choose the installer for your OS and tick "Add Python to PATH" during installation.</>,
+      tip:"On Mac, Python 3 is installed via Xcode tools or Homebrew. On Windows, get it from python.org — the Microsoft Store version can cause path issues."},
+    {n:"2",col:"#4ade80",title:"Download the backend files",
+      body:<>You need three files: <Code>server.py</Code>, <Code>requirements.txt</Code>, and <Code>Procfile</Code>. Put them all in the same folder — somewhere easy to find, like your Desktop or a folder called <Code>monte-carlo</Code>.</>,
+      tip:"Keep them alongside monte-carlo.html so everything is in one place."},
+    {n:"3",col:"#4ade80",title:"Open a terminal in that folder",
+      body:<><strong style={{color:"#c8d8e8"}}>Mac / Linux:</strong> Open Terminal and type <Code>cd ~/Desktop/monte-carlo</Code> (adjust path as needed).<br/><br/><strong style={{color:"#c8d8e8"}}>Windows:</strong> Open Command Prompt or PowerShell and type <Code>cd C:\Users\YourName\Desktop\monte-carlo</Code>. Or right-click the folder in Explorer → "Open in Terminal".</>,
+      tip:"Type 'ls' (Mac) or 'dir' (Windows) to confirm you can see server.py in the listing."},
+    {n:"4",col:"#4ade80",title:"Install the Python dependencies",
+      body:<>Run:<br/><br/><Code block>pip install flask flask-cors yfinance numpy gunicorn</Code><br/><br/>This only needs to be done once. If pip isn't found, try <Code>pip3</Code> instead.</>,
+      tip:"Permission errors on Mac/Linux? Add --user to the end of the pip command."},
+    {n:"5",col:"#4ade80",title:"Start the server",
+      body:<>Run:<br/><br/><Code block>python server.py</Code><br/><br/>You should see: <Code>Monte Carlo / Heston Options API → http://localhost:5000</Code><br/><br/>Leave this terminal open — closing it stops the server.</>,
+      tip:"On Mac you may need 'python3 server.py'."},
+    {n:"6",col:"#4ade80",title:"Open the HTML file in your browser",
+      body:<>Double-click <Code>monte-carlo.html</Code> or drag it into a browser window. The API URL field should say <Code>http://localhost:5000</Code>. Click <strong style={{color:GOLD}}>TEST</strong> — it should say ✅ Connected.</>,
+      tip:"Chrome and Firefox work best. Safari may block localhost connections."},
+    {n:"7",col:"#4ade80",title:"Fetch a ticker and import an option",
+      body:<>Type a ticker like <Code>AAPL</Code> or <Code>SPY</Code> and click <strong style={{color:"#c8d8e8"}}>FETCH</strong>. Select an expiry, choose CALLS or PUTS, click <strong style={{color:"#c8d8e8"}}>LOAD CHAIN</strong>, then click any row to import it into the Pricer.</>,
+      tip:"If you see IV of 0% on some rows, those are illiquid strikes — click one closer to the current price."},
+  ];
+  const cloudSteps=[
+    {n:"A",col:"#a78bfa",title:"Create a GitHub repository",
+      body:<>Go to <a href="https://github.com" target="_blank" rel="noopener noreferrer" style={{color:GOLD}}>github.com</a>, sign in, and create a new repository. Upload <Code>server.py</Code>, <Code>requirements.txt</Code>, and <Code>Procfile</Code> using the "Add file" button — no Git installation needed.</>,
+      tip:"The Procfile must be named exactly 'Procfile' with no extension."},
+    {n:"B",col:"#a78bfa",title:"Deploy on Railway",
+      body:<>Go to <a href="https://railway.app" target="_blank" rel="noopener noreferrer" style={{color:GOLD}}>railway.app</a> and sign in with GitHub. Click <strong style={{color:"#c8d8e8"}}>New Project → Deploy from GitHub repo</strong>, select your repo, and deploy. Railway auto-detects Python and uses the Procfile to start the server.</>,
+      tip:"First deploy takes 2–3 minutes. Watch the build logs in the Railway dashboard."},
+    {n:"C",col:"#a78bfa",title:"Generate a public domain",
+      body:<>In your Railway project, click the service → <strong style={{color:"#c8d8e8"}}>Settings → Networking → Generate Domain</strong>. Railway gives you a URL like <Code>https://yourapp.up.railway.app</Code>. Copy it exactly — no port number, no extra characters.</>,
+      tip:"The URL Railway gives you already handles HTTPS on port 443. Never add :5000 or any port to it."},
+    {n:"D",col:"#a78bfa",title:"Paste the URL and test",
+      body:<>Paste the Railway URL into the API URL field and click <strong style={{color:GOLD}}>TEST</strong>. You should see ✅ Connected. The import tab will now use your cloud server from any device, no local Python needed.</>,
+      tip:"If TEST fails, wait a minute and retry — Railway may still be spinning up the container on first request."},
+  ];
+  const steps=mode==="local"?localSteps:cloudSteps;
+  const accentCol=mode==="local"?"#4ade80":"#a78bfa";
+  return (
+    <div style={{background:"rgba(0,0,0,0.3)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:10,padding:"24px",marginBottom:24,animation:"bm-in .22s ease"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:20}}>
+        <div>
+          <div style={{fontSize:14,fontWeight:700,color:"#c8d8e8",letterSpacing:"0.08em",marginBottom:3}}>BACKEND SETUP GUIDE</div>
+          <div style={{fontSize:11,color:"rgba(200,216,232,0.35)"}}>The Python server fetches live prices and option chains from Yahoo Finance. The pricer itself runs entirely in your browser — you only need the server for live data.</div>
+        </div>
+        <button onClick={onClose} style={{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",color:"rgba(200,216,232,0.5)",borderRadius:6,width:30,height:30,cursor:"pointer",fontSize:16,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center",marginLeft:16}}>×</button>
+      </div>
+      <div style={{display:"flex",gap:8,marginBottom:20}}>
+        {[["local","💻  Run Locally"],["cloud","☁  Deploy to Cloud"]].map(([m,label])=>(
+          <button key={m} onClick={()=>setMode(m)}
+            style={{background:mode===m?"rgba(240,192,96,0.15)":"rgba(255,255,255,0.04)",border:`1px solid ${mode===m?"rgba(240,192,96,0.4)":"rgba(255,255,255,0.08)"}`,color:mode===m?GOLD:"rgba(200,216,232,0.45)",padding:"8px 18px",borderRadius:6,cursor:"pointer",fontSize:11,fontWeight:700,letterSpacing:"0.08em"}}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {mode==="cloud"&&(
+        <div style={{fontSize:12,color:"rgba(200,216,232,0.45)",lineHeight:1.8,background:"rgba(255,255,255,0.02)",border:"1px solid rgba(255,255,255,0.05)",borderRadius:8,padding:"12px 16px",marginBottom:14}}>
+          Cloud deployment lets the server run 24/7 without your computer. Railway auto-detects Python, has a free tier, and deploys in about 5 minutes.
+        </div>
+      )}
+      <div style={{display:"flex",flexDirection:"column",gap:12}}>
+        {steps.map(({n,col,title,body,tip})=>(
+          <div key={n} style={{display:"flex",gap:14,background:"rgba(255,255,255,0.02)",border:"1px solid rgba(255,255,255,0.05)",borderRadius:8,padding:"14px 16px"}}>
+            <div style={{background:`rgba(${col==="#60a5fa"?"96,165,250":col==="#a78bfa"?"167,139,250":"74,222,128"},0.15)`,color:col,borderRadius:"50%",width:28,height:28,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,flexShrink:0,marginTop:1}}>{n}</div>
+            <div style={{flex:1}}>
+              <div style={{fontSize:13,fontWeight:700,color:"#c8d8e8",marginBottom:6}}>{title}</div>
+              <div style={{fontSize:12,color:"rgba(200,216,232,0.55)",lineHeight:1.8,marginBottom:tip?8:0}}>{body}</div>
+              {tip&&<div style={{fontSize:11,color:`${accentCol}99`,background:`${accentCol}10`,border:`1px solid ${accentCol}22`,borderRadius:5,padding:"6px 10px",lineHeight:1.6}}>💡 {tip}</div>}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div style={{marginTop:14,background:`${accentCol}0d`,border:`1px solid ${accentCol}26`,borderRadius:8,padding:"12px 16px",fontSize:12,color:"rgba(200,216,232,0.45)",lineHeight:1.7}}>
+        {mode==="local"
+          ? <><strong style={{color:`${accentCol}b3`}}>Next time:</strong> Steps 1–4 are done. Just open a terminal, navigate to the folder, run <Code>python server.py</Code>, and open the HTML.</>
+          : <><strong style={{color:`${accentCol}b3`}}>Railway free tier:</strong> Includes $5 of compute per month — more than enough for occasional use. If the service sleeps, the first request wakes it up after ~10 seconds.</>}
+      </div>
+    </div>
+  );
+}
+
+// ── URL validator ─────────────────────────────────────────────────────────────
 function validateUrl(raw) {
   const u = raw.trim().replace(/\/$/, "");
   if (/https?:\/\/:[^/]/.test(u))
@@ -860,108 +945,7 @@ function App() {
               <button onClick={()=>setShowSetup(v=>!v)} style={{background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",color:"rgba(200,216,232,0.5)",borderRadius:"50%",width:24,height:24,cursor:"pointer",fontSize:12,fontWeight:700}}>?</button>
             </div>
 
-            {showSetup&&(
-              <div style={{background:"rgba(0,0,0,0.3)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:10,padding:"24px",marginBottom:24,animation:"bm-in .22s ease"}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
-                  <div>
-                    <div style={{fontSize:14,fontWeight:700,color:"#c8d8e8",letterSpacing:"0.08em",marginBottom:3}}>BACKEND SETUP GUIDE</div>
-                    <div style={{fontSize:11,color:"rgba(200,216,232,0.35)"}}>The Python server fetches live prices and option chains from Yahoo Finance. The pricer itself runs entirely in your browser — you only need the server for live data.</div>
-                  </div>
-                  <button onClick={()=>setShowSetup(false)} style={{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",color:"rgba(200,216,232,0.5)",borderRadius:6,width:30,height:30,cursor:"pointer",fontSize:16,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
-                </div>
-
-                {/* Toggle: local vs cloud */}
-                {(()=>{
-                  const [mode,setMode]=useState("local");
-                  return (
-                    <div>
-                      <div style={{display:"flex",gap:8,marginBottom:20}}>
-                        {[["local","💻  Run Locally"],["cloud","☁  Deploy to Cloud"]].map(([m,label])=>(
-                          <button key={m} onClick={()=>setMode(m)}
-                            style={{background:mode===m?"rgba(240,192,96,0.15)":"rgba(255,255,255,0.04)",border:`1px solid ${mode===m?"rgba(240,192,96,0.4)":"rgba(255,255,255,0.08)"}`,color:mode===m?GOLD:"rgba(200,216,232,0.45)",padding:"8px 18px",borderRadius:6,cursor:"pointer",fontSize:11,fontWeight:700,letterSpacing:"0.08em"}}>
-                            {label}
-                          </button>
-                        ))}
-                      </div>
-
-                      {mode==="local" && (
-                        <div style={{display:"flex",flexDirection:"column",gap:14}}>
-                          {[
-                            {n:"1",col:"#60a5fa",title:"Check Python is installed",
-                              body:<>Open a terminal and run <Code>python --version</Code> or <Code>python3 --version</Code>. You need Python 3.8 or newer. If you don't have it, download it from <a href="https://python.org" target="_blank" rel="noopener noreferrer" style={{color:GOLD}}>python.org</a> — choose the installer for your OS and tick "Add Python to PATH" during installation.</>,
-                              tip:"On Mac, Python 3 is installed via Xcode tools or Homebrew. On Windows, get it from python.org — the Microsoft Store version can cause path issues."},
-                            {n:"2",col:"#4ade80",title:"Download the backend files",
-                              body:<>You need three files from this project: <Code>server.py</Code>, <Code>requirements.txt</Code>, and <Code>Procfile</Code>. Put them all in the same folder — somewhere easy to find, like your Desktop or a folder called <Code>monte-carlo</Code>.</>,
-                              tip:"Keep them alongside monte-carlo.html so everything is in one place."},
-                            {n:"3",col:"#4ade80",title:"Open a terminal in that folder",
-                              body:<><strong style={{color:"#c8d8e8"}}>Mac / Linux:</strong> Open Terminal and type <Code>cd ~/Desktop/monte-carlo</Code> (adjust the path to match where you put the files). Then press Enter.<br/><br/><strong style={{color:"#c8d8e8"}}>Windows:</strong> Open Command Prompt or PowerShell. Type <Code>cd C:\Users\YourName\Desktop\monte-carlo</Code> and press Enter. Or: right-click the folder in Explorer → "Open in Terminal".</>,
-                              tip:"Type 'ls' (Mac) or 'dir' (Windows) to confirm you can see server.py in the listing."},
-                            {n:"4",col:"#4ade80",title:"Install the Python dependencies",
-                              body:<>Run this command exactly as shown:<br/><br/><Code block>pip install flask flask-cors yfinance numpy gunicorn</Code><br/><br/>This downloads and installs the packages the server needs. It only needs to be done once. If pip isn't found, try <Code>pip3</Code> instead.</>,
-                              tip:"If you see permission errors on Mac/Linux, add --user to the end: pip install flask flask-cors yfinance numpy gunicorn --user"},
-                            {n:"5",col:"#4ade80",title:"Start the server",
-                              body:<>Run:<br/><br/><Code block>python server.py</Code><br/><br/>You should see: <Code>Monte Carlo / Heston Options API → http://localhost:5000</Code><br/><br/>Leave this terminal window open — the server runs as long as that window is open. If you close it, the server stops.</>,
-                              tip:"On Mac you may need 'python3 server.py' instead of 'python server.py'."},
-                            {n:"6",col:"#4ade80",title:"Open the HTML file in your browser",
-                              body:<>Open <Code>monte-carlo.html</Code> by double-clicking it in your file explorer, or drag it into a browser window. The API URL below should already say <Code>http://localhost:5000</Code>. Click <strong style={{color:GOLD}}>TEST</strong> — it should say ✅ Connected.</>,
-                              tip:"Chrome and Firefox both work well. Safari may block localhost connections — use Chrome if you have issues."},
-                            {n:"7",col:"#4ade80",title:"Fetch a ticker and import an option",
-                              body:<>Type a ticker like <Code>AAPL</Code> or <Code>SPY</Code> and click <strong style={{color:"#c8d8e8"}}>FETCH</strong>. Once the stock price loads, select an expiry from the dropdown, choose CALLS or PUTS, and click <strong style={{color:"#c8d8e8"}}>LOAD CHAIN</strong>. Click any row in the table — the parameters will be automatically imported into the Pricer and the simulation will run.</>,
-                              tip:"If you see an IV of 0% for some rows, those are illiquid strikes with no reliable market data — try clicking a strike closer to the current price."},
-                          ].map(({n,col,title,body,tip})=>(
-                            <div key={n} style={{display:"flex",gap:14,background:"rgba(255,255,255,0.02)",border:"1px solid rgba(255,255,255,0.05)",borderRadius:8,padding:"14px 16px"}}>
-                              <div style={{background:`rgba(${n==="1"?"96,165,250":"74,222,128"},0.15)`,color:col,borderRadius:"50%",width:28,height:28,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,flexShrink:0,marginTop:1}}>{n}</div>
-                              <div style={{flex:1}}>
-                                <div style={{fontSize:13,fontWeight:700,color:"#c8d8e8",marginBottom:6}}>{title}</div>
-                                <div style={{fontSize:12,color:"rgba(200,216,232,0.55)",lineHeight:1.8,marginBottom:tip?8:0}}>{body}</div>
-                                {tip&&<div style={{fontSize:11,color:"rgba(240,192,96,0.6)",background:"rgba(240,192,96,0.06)",border:"1px solid rgba(240,192,96,0.12)",borderRadius:5,padding:"6px 10px",lineHeight:1.6}}>💡 {tip}</div>}
-                              </div>
-                            </div>
-                          ))}
-                          <div style={{background:"rgba(74,222,128,0.05)",border:"1px solid rgba(74,222,128,0.15)",borderRadius:8,padding:"12px 16px",fontSize:12,color:"rgba(200,216,232,0.45)",lineHeight:1.7}}>
-                            <strong style={{color:"rgba(74,222,128,0.7)"}}>Next time:</strong> Steps 1–4 are done. Just open a terminal, navigate to the folder, run <Code>python server.py</Code>, and open the HTML file.
-                          </div>
-                        </div>
-                      )}
-
-                      {mode==="cloud" && (
-                        <div style={{display:"flex",flexDirection:"column",gap:14}}>
-                          <div style={{fontSize:12,color:"rgba(200,216,232,0.45)",lineHeight:1.8,background:"rgba(255,255,255,0.02)",border:"1px solid rgba(255,255,255,0.05)",borderRadius:8,padding:"12px 16px"}}>
-                            Cloud deployment lets the server run 24/7 without your computer being on. Railway is the easiest option — it auto-detects Python, has a free tier, and deploys in about 5 minutes.
-                          </div>
-                          {[
-                            {n:"A",col:"#a78bfa",title:"Create a GitHub repository",
-                              body:<>Go to <a href="https://github.com" target="_blank" rel="noopener noreferrer" style={{color:GOLD}}>github.com</a>, sign in (or create a free account), and create a new repository called <Code>monte-carlo-api</Code> (or any name). Upload <Code>server.py</Code>, <Code>requirements.txt</Code>, and <Code>Procfile</Code> to it — you can use the "Add file" button on the GitHub website without needing Git installed.</>,
-                              tip:"The Procfile tells Railway how to start the server. It must be named exactly 'Procfile' with no extension."},
-                            {n:"B",col:"#a78bfa",title:"Deploy on Railway",
-                              body:<>Go to <a href="https://railway.app" target="_blank" rel="noopener noreferrer" style={{color:GOLD}}>railway.app</a> and sign in with your GitHub account. Click <strong style={{color:"#c8d8e8"}}>New Project → Deploy from GitHub repo</strong>, select your repository, and click Deploy. Railway will automatically detect Python, install from requirements.txt, and start the server using the Procfile.</>,
-                              tip:"The first deploy takes 2–3 minutes. You can watch the logs in real-time in the Railway dashboard."},
-                            {n:"C",col:"#a78bfa",title:"Get your public URL",
-                              body:<>Once deployed, go to your project in Railway, click the service, then <strong style={{color:"#c8d8e8"}}>Settings → Networking → Generate Domain</strong>. Railway will give you a URL like <Code>https://web-production-xxxx.up.railway.app</Code>. Copy this URL.</>,
-                              tip:"Make sure the URL starts with https:// — the app will show a ☁ cloud indicator when it detects a secure URL."},
-                            {n:"D",col:"#a78bfa",title:"Paste the URL and connect",
-                              body:<>Paste the Railway URL into the API URL field below and click <strong style={{color:GOLD}}>TEST</strong>. You should see ✅ Connected. From then on, the Import Option tab will use your cloud server — no local Python needed.</>,
-                              tip:"If TEST fails, wait another minute and try again — Railway may still be starting up the container."},
-                          ].map(({n,col,title,body,tip})=>(
-                            <div key={n} style={{display:"flex",gap:14,background:"rgba(255,255,255,0.02)",border:"1px solid rgba(255,255,255,0.05)",borderRadius:8,padding:"14px 16px"}}>
-                              <div style={{background:"rgba(167,139,250,0.15)",color:col,borderRadius:"50%",width:28,height:28,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,flexShrink:0,marginTop:1}}>{n}</div>
-                              <div style={{flex:1}}>
-                                <div style={{fontSize:13,fontWeight:700,color:"#c8d8e8",marginBottom:6}}>{title}</div>
-                                <div style={{fontSize:12,color:"rgba(200,216,232,0.55)",lineHeight:1.8,marginBottom:tip?8:0}}>{body}</div>
-                                {tip&&<div style={{fontSize:11,color:"rgba(167,139,250,0.7)",background:"rgba(167,139,250,0.06)",border:"1px solid rgba(167,139,250,0.15)",borderRadius:5,padding:"6px 10px",lineHeight:1.6}}>💡 {tip}</div>}
-                              </div>
-                            </div>
-                          ))}
-                          <div style={{background:"rgba(167,139,250,0.05)",border:"1px solid rgba(167,139,250,0.15)",borderRadius:8,padding:"12px 16px",fontSize:12,color:"rgba(200,216,232,0.45)",lineHeight:1.7}}>
-                            <strong style={{color:"rgba(167,139,250,0.7)"}}>Railway free tier:</strong> Includes $5 of compute per month, which runs a lightweight Flask server for many hours. If you exceed it, the service sleeps until the next month. For occasional use this is more than enough.
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })()}
-              </div>
-            )}
+            {showSetup&&<SetupGuide onClose={()=>setShowSetup(false)}/>}
 
             {/* API URL */}
             {(()=>{
