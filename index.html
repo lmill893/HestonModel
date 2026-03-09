@@ -438,36 +438,83 @@ function YTCard({href,title}) {
   );
 }
 
-// ── Bookmark nav ──────────────────────────────────────────────────────────────
+// ── Inline code snippet helper ────────────────────────────────────────────────
+function Code({children, block}) {
+  if (block) return (
+    <div style={{background:"rgba(0,0,0,0.4)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:6,padding:"10px 14px",fontFamily:"monospace",fontSize:12,color:"#4ade80",letterSpacing:"0.04em",margin:"4px 0",userSelect:"all"}}>
+      {children}
+    </div>
+  );
+  return <code style={{background:"rgba(255,255,255,0.08)",borderRadius:3,padding:"1px 5px",fontFamily:"monospace",fontSize:11,color:"rgba(200,216,232,0.85)"}}>{children}</code>;
+}
+
+// ── Bookmark / top nav ────────────────────────────────────────────────────────
 function HeaderDrawer({tab,setTab}) {
-  const [open,setOpen]=useState(true);
-  const [anim,setAnim]=useState("");
-  const collapse=()=>{setAnim("bm-out");setTimeout(()=>{setOpen(false);setAnim("");},280);};
-  const expand=()=>{setOpen(true);setAnim("bm-in");};
+  const [open,setOpen]=useState(false);
+  const tabs=[
+    {id:"pricer",   label:"PRICER",       icon:"◈"},
+    {id:"import",   label:"IMPORT OPTION",icon:"⬇"},
+    {id:"explainer",label:"HOW IT WORKS", icon:"◉"},
+  ];
   return (
-    <div className="bookmark-panel">
-      {open&&(
-        <div className={`bookmark-body ${anim}`}>
-          <div style={{width:"100%",height:2,background:"linear-gradient(90deg,#f0c060,transparent)",borderRadius:1,marginBottom:2}}/>
-          <div style={{fontFamily:"Arial",fontSize:22,fontWeight:800,letterSpacing:"0.08em",color:GOLD,lineHeight:1,textAlign:"center"}}>MONTE<br/>CARLO</div>
-          <div style={{fontFamily:"Arial",fontSize:9,letterSpacing:"0.2em",color:"rgba(200,216,232,0.3)",textAlign:"center",marginBottom:2}}>HESTON · OPTION PRICER</div>
-          <div style={{width:"100%",height:1,background:"rgba(255,255,255,0.07)"}}/>
-          <div style={{display:"flex",flexDirection:"column",gap:6,width:"100%"}}>
-            <button className={`tab-btn ${tab==="pricer"?"active":""}`} style={{textAlign:"left",padding:"7px 10px",borderRadius:4}} onClick={()=>setTab("pricer")}>PRICER</button>
-            <button className={`tab-btn ${tab==="import"?"active":""}`} style={{textAlign:"left",padding:"7px 10px",borderRadius:4}} onClick={()=>setTab("import")}>IMPORT OPTION</button>
-            <button className={`tab-btn ${tab==="explainer"?"active":""}`} style={{textAlign:"left",padding:"7px 10px",borderRadius:4}} onClick={()=>setTab("explainer")}>HOW IT WORKS</button>
-          </div>
-          <div style={{width:"100%",height:1,background:"rgba(255,255,255,0.07)"}}/>
-          <div onClick={collapse} style={{fontSize:9,color:"rgba(255,255,255,0.2)",letterSpacing:"0.12em",cursor:"pointer",textAlign:"center"}}>◀ HIDE</div>
+    <div className="top-nav">
+      {/* Bar */}
+      <div className="top-nav-bar">
+        <div style={{display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
+          <div style={{fontFamily:"Arial",fontSize:15,fontWeight:800,letterSpacing:"0.1em",color:GOLD}}>MONTE CARLO</div>
+          <div style={{fontSize:9,letterSpacing:"0.18em",color:"rgba(200,216,232,0.28)",borderLeft:"1px solid rgba(255,255,255,0.1)",paddingLeft:10}}>HESTON · OPTION PRICER</div>
         </div>
-      )}
-      {!open&&(
-        <div className="bookmark-tab" onClick={expand}>
-          <span style={{writingMode:"vertical-rl",letterSpacing:"0.15em",fontSize:10,color:GOLD}}>MONTE CARLO</span>
+        <div style={{display:"flex",gap:4}}>
+          {tabs.map(t=>(
+            <button key={t.id} className={`top-tab-btn ${tab===t.id?"active":""}`} onClick={()=>{setTab(t.id);setOpen(false);}}>
+              <span style={{marginRight:5,opacity:0.6}}>{t.icon}</span>{t.label}
+            </button>
+          ))}
+        </div>
+        <button className="top-menu-btn" onClick={()=>setOpen(v=>!v)} title="Menu">
+          <span style={{fontSize:14,lineHeight:1}}>{open?"✕":"☰"}</span>
+        </button>
+      </div>
+
+      {/* Dropdown panel */}
+      {open&&(
+        <div className="top-nav-dropdown">
+          <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:16}}>
+            {tabs.map(t=>(
+              <button key={t.id} className={`top-tab-btn ${tab===t.id?"active":""}`}
+                style={{padding:"12px 10px",flexDirection:"column",gap:4,fontSize:11}}
+                onClick={()=>{setTab(t.id);setOpen(false);}}>
+                <span style={{fontSize:18,opacity:0.7}}>{t.icon}</span>
+                {t.label}
+              </button>
+            ))}
+          </div>
+          <div style={{borderTop:"1px solid rgba(255,255,255,0.06)",paddingTop:12,display:"flex",gap:16,flexWrap:"wrap"}}>
+            <div style={{fontSize:11,color:"rgba(200,216,232,0.35)",lineHeight:1.8}}>
+              <div style={{color:"rgba(200,216,232,0.6)",fontWeight:700,marginBottom:4}}>WHAT IS THIS?</div>
+              A browser-based option pricing engine using the <span style={{color:GOLD}}>Heston stochastic volatility model</span>. Simulate thousands of price paths, compare to Black-Scholes, and import live option chains from the market.
+            </div>
+            <div style={{fontSize:11,color:"rgba(200,216,232,0.35)",lineHeight:1.8}}>
+              <div style={{color:"rgba(200,216,232,0.6)",fontWeight:700,marginBottom:4}}>QUICK START</div>
+              Hit <span style={{color:GOLD}}>▶ SIMULATE</span> on the Pricer tab to run immediately with default parameters. Use the presets to explore different market scenarios. For real market data, set up the Python backend via the Import Option tab.
+            </div>
+          </div>
         </div>
       )}
     </div>
   );
+}
+
+// ── URL validator (module-level so it can be called before App renders) ───────
+function validateUrl(raw) {
+  const u = raw.trim().replace(/\/$/, "");
+  if (/https?:\/\/:[^/]/.test(u))
+    return {ok:false, msg:"❌ Malformed URL — remove the colon after https://", fixed:u.replace(/^(https?:\/\/):+/, "$1")};
+  if (!/^https?:\/\//.test(u))
+    return {ok:false, msg:"❌ URL must start with http:// or https://", fixed:"https://"+u};
+  if (/\.railway\.app:\d+/.test(u))
+    return {ok:false, msg:"❌ Remove the port — Railway handles routing automatically", fixed:u.replace(/:\d+$/, "")};
+  return {ok:true, msg:null, fixed:u};
 }
 
 // ── Presets ───────────────────────────────────────────────────────────────────
@@ -500,7 +547,7 @@ function App() {
   const [showSetup,setShowSetup]=useState(false);
   const [apiUrl,setApiUrl]=useState("http://localhost:5000");
   const [apiTestMsg,setApiTestMsg]=useState("");
-  const API=apiUrl.replace(/\/$/,"");
+  const API=validateUrl(apiUrl).fixed||apiUrl.replace(/\/$/,"");
 
   const safeJson=async(res)=>{
     const text=await res.text();
@@ -513,12 +560,34 @@ function App() {
   };
 
   const testApi=async()=>{
+    const {ok,msg,fixed}=validateUrl(apiUrl);
+    if(!ok){
+      setApiTestMsg(msg);
+      if(fixed&&fixed!==apiUrl) setApiUrl(fixed);  // auto-correct the URL
+      return;
+    }
     setApiTestMsg("testing…");
     try{
-      const res=await fetch(`${API}/`);
-      const d=await safeJson(res);
-      setApiTestMsg(d.status==="ok"?"✅ Connected!":"⚠ Unexpected response");
-    }catch(e){ setApiTestMsg("❌ Cannot reach server"); }
+      const res=await fetch(`${fixed}/`);
+      const text=await res.text();
+      // Diagnose specific failure modes
+      if(text.includes("GitHub Pages")||text.includes("Page not found")){
+        setApiTestMsg("❌ Got a GitHub Pages 404 — your Railway service isn't deployed or the URL is wrong");
+        return;
+      }
+      if(text.trim().startsWith("<")){
+        setApiTestMsg("❌ Server returned HTML, not JSON — wrong URL or service not running");
+        return;
+      }
+      const d=JSON.parse(text);
+      setApiTestMsg(d.status==="ok"?"✅ Connected!":"⚠ Unexpected response: "+JSON.stringify(d));
+    }catch(e){
+      if(e.message.includes("fetch")||e.message.includes("NetworkError")){
+        setApiTestMsg("❌ Cannot reach server — check the URL and that Railway has deployed");
+      } else {
+        setApiTestMsg("❌ "+e.message.slice(0,80));
+      }
+    }
   };
 
   const fetchStock=async(ticker)=>{
@@ -600,20 +669,21 @@ function App() {
   ];
 
   return (
-    <div style={{minHeight:"100vh",background:"#060810",color:"#c8d8e8",fontFamily:"Arial,sans-serif",display:"flex",flexDirection:"column",alignItems:"center",padding:"20px 20px 40px"}}>
+    <div style={{minHeight:"100vh",background:"#060810",color:"#c8d8e8",fontFamily:"Arial,sans-serif",display:"flex",flexDirection:"column",alignItems:"center",padding:"16px 20px 40px"}}>
       <style>{`
         *{box-sizing:border-box}
-        @keyframes bm-in{from{opacity:0;transform:translateX(-18px)}to{opacity:1;transform:translateX(0)}}
-        @keyframes bm-out{from{opacity:1;transform:translateX(0)}to{opacity:0;transform:translateX(-18px)}}
-        @keyframes bounce{0%,100%{transform:scale(1)}50%{transform:scale(1.18)}}
-        .bm-in{animation:bm-in .28s ease}
-        .bm-out{animation:bm-out .28s ease}
-        .bookmark-panel{position:fixed;left:0;top:50%;transform:translateY(-50%);z-index:100;display:flex;align-items:center}
-        .bookmark-body{background:#0d1420;border:1px solid rgba(255,255,255,0.09);border-left:none;border-radius:0 10px 10px 0;padding:18px 14px;display:flex;flex-direction:column;gap:10px;align-items:center;min-width:140px;box-shadow:4px 0 24px rgba(0,0,0,0.5)}
-        .bookmark-tab{background:#0d1420;border:1px solid rgba(255,255,255,0.09);border-left:none;border-radius:0 8px 8px 0;padding:18px 8px;cursor:pointer;display:flex;align-items:center;justify-content:center}
-        .tab-btn{background:transparent;border:1px solid rgba(255,255,255,0.07);color:rgba(200,216,232,0.5);font-family:Arial;font-size:10px;font-weight:700;letter-spacing:0.12em;cursor:pointer;transition:all .15s;width:100%}
-        .tab-btn:hover{background:rgba(255,255,255,0.05);color:rgba(200,216,232,0.8)}
-        .tab-btn.active{background:rgba(240,192,96,0.12);border-color:rgba(240,192,96,0.4);color:#f0c060}
+        @keyframes bm-in{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:translateY(0)}}
+        @keyframes bm-out{from{opacity:1}to{opacity:0}}
+        .bm-in{animation:bm-in .22s ease}
+        .bm-out{animation:bm-out .22s ease}
+        .top-nav{width:100%;max-width:1400px;position:sticky;top:0;z-index:100;margin-bottom:16px}
+        .top-nav-bar{background:#0a0f1a;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:10px 16px;display:flex;align-items:center;justify-content:space-between;gap:12;box-shadow:0 4px 24px rgba(0,0,0,0.5)}
+        .top-nav-dropdown{background:#0d1220;border:1px solid rgba(255,255,255,0.08);border-top:none;border-radius:0 0 10px 10px;padding:16px 20px;box-shadow:0 8px 32px rgba(0,0,0,0.5);animation:bm-in .22s ease}
+        .top-tab-btn{background:transparent;border:1px solid rgba(255,255,255,0.07);color:rgba(200,216,232,0.45);font-family:Arial;font-size:10px;font-weight:700;letter-spacing:0.12em;padding:7px 14px;border-radius:5px;cursor:pointer;transition:all .15s;display:flex;align-items:center}
+        .top-tab-btn:hover{background:rgba(255,255,255,0.05);color:rgba(200,216,232,0.8);border-color:rgba(255,255,255,0.15)}
+        .top-tab-btn.active{background:rgba(240,192,96,0.12);border-color:rgba(240,192,96,0.4);color:#f0c060}
+        .top-menu-btn{background:transparent;border:1px solid rgba(255,255,255,0.07);color:rgba(200,216,232,0.4);width:32px;height:32px;border-radius:5px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s;flex-shrink:0}
+        .top-menu-btn:hover{background:rgba(255,255,255,0.05);color:rgba(200,216,232,0.8)}
         .preset-btn{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);color:rgba(200,216,232,0.5);font-family:Arial;font-size:9px;font-weight:700;letter-spacing:0.1em;padding:5px 10px;border-radius:4px;cursor:pointer;transition:all .15s}
         .preset-btn:hover{background:rgba(240,192,96,0.1);border-color:rgba(240,192,96,0.35);color:#f0c060}
         .panel{background:#0d1218;border:1px solid rgba(255,255,255,0.06);border-radius:8px}
@@ -791,50 +861,137 @@ function App() {
             </div>
 
             {showSetup&&(
-              <div style={{background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.07)",borderRadius:8,padding:"20px",marginBottom:20}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-                  <span style={{fontSize:13,fontWeight:700,color:"#c8d8e8",letterSpacing:"0.06em"}}>SETUP GUIDE</span>
-                  <button onClick={()=>setShowSetup(false)} style={{background:"none",border:"none",color:"rgba(200,216,232,0.4)",cursor:"pointer",fontSize:16}}>×</button>
+              <div style={{background:"rgba(0,0,0,0.3)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:10,padding:"24px",marginBottom:24,animation:"bm-in .22s ease"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+                  <div>
+                    <div style={{fontSize:14,fontWeight:700,color:"#c8d8e8",letterSpacing:"0.08em",marginBottom:3}}>BACKEND SETUP GUIDE</div>
+                    <div style={{fontSize:11,color:"rgba(200,216,232,0.35)"}}>The Python server fetches live prices and option chains from Yahoo Finance. The pricer itself runs entirely in your browser — you only need the server for live data.</div>
+                  </div>
+                  <button onClick={()=>setShowSetup(false)} style={{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",color:"rgba(200,216,232,0.5)",borderRadius:6,width:30,height:30,cursor:"pointer",fontSize:16,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
                 </div>
-                {[
-                  ["1","Check Python","Make sure Python 3 is installed: python --version. Download from python.org if needed."],
-                  ["2","Place files","Put server.py, requirements.txt, and Procfile in a folder on your computer."],
-                  ["3","Install deps","In a terminal: pip install flask flask-cors yfinance numpy gunicorn"],
-                  ["4","Navigate","Mac: cd ~/path/to/folder  |  Windows: cd C:\\path\\to\\folder"],
-                  ["5","Start server","Run: python server.py — you should see 'running on http://localhost:5000'"],
-                  ["6","Open HTML","Open monte-carlo.html in your browser. The API URL below should read http://localhost:5000"],
-                  ["7","Import option","Fetch a ticker, choose an expiry, load the chain, click a row to import"],
-                ].map(([n,title,desc])=>(
-                  <div key={n} style={{display:"flex",gap:14,marginBottom:14}}>
-                    <span style={{background:"rgba(74,222,128,0.2)",color:GREEN,borderRadius:"50%",width:24,height:24,display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,flexShrink:0}}>{n}</span>
+
+                {/* Toggle: local vs cloud */}
+                {(()=>{
+                  const [mode,setMode]=useState("local");
+                  return (
                     <div>
-                      <div style={{fontSize:13,fontWeight:700,color:"#c8d8e8",marginBottom:3}}>{title}</div>
-                      <div style={{fontSize:12,color:"rgba(200,216,232,0.5)",lineHeight:1.7}}>{desc}</div>
+                      <div style={{display:"flex",gap:8,marginBottom:20}}>
+                        {[["local","💻  Run Locally"],["cloud","☁  Deploy to Cloud"]].map(([m,label])=>(
+                          <button key={m} onClick={()=>setMode(m)}
+                            style={{background:mode===m?"rgba(240,192,96,0.15)":"rgba(255,255,255,0.04)",border:`1px solid ${mode===m?"rgba(240,192,96,0.4)":"rgba(255,255,255,0.08)"}`,color:mode===m?GOLD:"rgba(200,216,232,0.45)",padding:"8px 18px",borderRadius:6,cursor:"pointer",fontSize:11,fontWeight:700,letterSpacing:"0.08em"}}>
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+
+                      {mode==="local" && (
+                        <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                          {[
+                            {n:"1",col:"#60a5fa",title:"Check Python is installed",
+                              body:<>Open a terminal and run <Code>python --version</Code> or <Code>python3 --version</Code>. You need Python 3.8 or newer. If you don't have it, download it from <a href="https://python.org" target="_blank" rel="noopener noreferrer" style={{color:GOLD}}>python.org</a> — choose the installer for your OS and tick "Add Python to PATH" during installation.</>,
+                              tip:"On Mac, Python 3 is installed via Xcode tools or Homebrew. On Windows, get it from python.org — the Microsoft Store version can cause path issues."},
+                            {n:"2",col:"#4ade80",title:"Download the backend files",
+                              body:<>You need three files from this project: <Code>server.py</Code>, <Code>requirements.txt</Code>, and <Code>Procfile</Code>. Put them all in the same folder — somewhere easy to find, like your Desktop or a folder called <Code>monte-carlo</Code>.</>,
+                              tip:"Keep them alongside monte-carlo.html so everything is in one place."},
+                            {n:"3",col:"#4ade80",title:"Open a terminal in that folder",
+                              body:<><strong style={{color:"#c8d8e8"}}>Mac / Linux:</strong> Open Terminal and type <Code>cd ~/Desktop/monte-carlo</Code> (adjust the path to match where you put the files). Then press Enter.<br/><br/><strong style={{color:"#c8d8e8"}}>Windows:</strong> Open Command Prompt or PowerShell. Type <Code>cd C:\Users\YourName\Desktop\monte-carlo</Code> and press Enter. Or: right-click the folder in Explorer → "Open in Terminal".</>,
+                              tip:"Type 'ls' (Mac) or 'dir' (Windows) to confirm you can see server.py in the listing."},
+                            {n:"4",col:"#4ade80",title:"Install the Python dependencies",
+                              body:<>Run this command exactly as shown:<br/><br/><Code block>pip install flask flask-cors yfinance numpy gunicorn</Code><br/><br/>This downloads and installs the packages the server needs. It only needs to be done once. If pip isn't found, try <Code>pip3</Code> instead.</>,
+                              tip:"If you see permission errors on Mac/Linux, add --user to the end: pip install flask flask-cors yfinance numpy gunicorn --user"},
+                            {n:"5",col:"#4ade80",title:"Start the server",
+                              body:<>Run:<br/><br/><Code block>python server.py</Code><br/><br/>You should see: <Code>Monte Carlo / Heston Options API → http://localhost:5000</Code><br/><br/>Leave this terminal window open — the server runs as long as that window is open. If you close it, the server stops.</>,
+                              tip:"On Mac you may need 'python3 server.py' instead of 'python server.py'."},
+                            {n:"6",col:"#4ade80",title:"Open the HTML file in your browser",
+                              body:<>Open <Code>monte-carlo.html</Code> by double-clicking it in your file explorer, or drag it into a browser window. The API URL below should already say <Code>http://localhost:5000</Code>. Click <strong style={{color:GOLD}}>TEST</strong> — it should say ✅ Connected.</>,
+                              tip:"Chrome and Firefox both work well. Safari may block localhost connections — use Chrome if you have issues."},
+                            {n:"7",col:"#4ade80",title:"Fetch a ticker and import an option",
+                              body:<>Type a ticker like <Code>AAPL</Code> or <Code>SPY</Code> and click <strong style={{color:"#c8d8e8"}}>FETCH</strong>. Once the stock price loads, select an expiry from the dropdown, choose CALLS or PUTS, and click <strong style={{color:"#c8d8e8"}}>LOAD CHAIN</strong>. Click any row in the table — the parameters will be automatically imported into the Pricer and the simulation will run.</>,
+                              tip:"If you see an IV of 0% for some rows, those are illiquid strikes with no reliable market data — try clicking a strike closer to the current price."},
+                          ].map(({n,col,title,body,tip})=>(
+                            <div key={n} style={{display:"flex",gap:14,background:"rgba(255,255,255,0.02)",border:"1px solid rgba(255,255,255,0.05)",borderRadius:8,padding:"14px 16px"}}>
+                              <div style={{background:`rgba(${n==="1"?"96,165,250":"74,222,128"},0.15)`,color:col,borderRadius:"50%",width:28,height:28,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,flexShrink:0,marginTop:1}}>{n}</div>
+                              <div style={{flex:1}}>
+                                <div style={{fontSize:13,fontWeight:700,color:"#c8d8e8",marginBottom:6}}>{title}</div>
+                                <div style={{fontSize:12,color:"rgba(200,216,232,0.55)",lineHeight:1.8,marginBottom:tip?8:0}}>{body}</div>
+                                {tip&&<div style={{fontSize:11,color:"rgba(240,192,96,0.6)",background:"rgba(240,192,96,0.06)",border:"1px solid rgba(240,192,96,0.12)",borderRadius:5,padding:"6px 10px",lineHeight:1.6}}>💡 {tip}</div>}
+                              </div>
+                            </div>
+                          ))}
+                          <div style={{background:"rgba(74,222,128,0.05)",border:"1px solid rgba(74,222,128,0.15)",borderRadius:8,padding:"12px 16px",fontSize:12,color:"rgba(200,216,232,0.45)",lineHeight:1.7}}>
+                            <strong style={{color:"rgba(74,222,128,0.7)"}}>Next time:</strong> Steps 1–4 are done. Just open a terminal, navigate to the folder, run <Code>python server.py</Code>, and open the HTML file.
+                          </div>
+                        </div>
+                      )}
+
+                      {mode==="cloud" && (
+                        <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                          <div style={{fontSize:12,color:"rgba(200,216,232,0.45)",lineHeight:1.8,background:"rgba(255,255,255,0.02)",border:"1px solid rgba(255,255,255,0.05)",borderRadius:8,padding:"12px 16px"}}>
+                            Cloud deployment lets the server run 24/7 without your computer being on. Railway is the easiest option — it auto-detects Python, has a free tier, and deploys in about 5 minutes.
+                          </div>
+                          {[
+                            {n:"A",col:"#a78bfa",title:"Create a GitHub repository",
+                              body:<>Go to <a href="https://github.com" target="_blank" rel="noopener noreferrer" style={{color:GOLD}}>github.com</a>, sign in (or create a free account), and create a new repository called <Code>monte-carlo-api</Code> (or any name). Upload <Code>server.py</Code>, <Code>requirements.txt</Code>, and <Code>Procfile</Code> to it — you can use the "Add file" button on the GitHub website without needing Git installed.</>,
+                              tip:"The Procfile tells Railway how to start the server. It must be named exactly 'Procfile' with no extension."},
+                            {n:"B",col:"#a78bfa",title:"Deploy on Railway",
+                              body:<>Go to <a href="https://railway.app" target="_blank" rel="noopener noreferrer" style={{color:GOLD}}>railway.app</a> and sign in with your GitHub account. Click <strong style={{color:"#c8d8e8"}}>New Project → Deploy from GitHub repo</strong>, select your repository, and click Deploy. Railway will automatically detect Python, install from requirements.txt, and start the server using the Procfile.</>,
+                              tip:"The first deploy takes 2–3 minutes. You can watch the logs in real-time in the Railway dashboard."},
+                            {n:"C",col:"#a78bfa",title:"Get your public URL",
+                              body:<>Once deployed, go to your project in Railway, click the service, then <strong style={{color:"#c8d8e8"}}>Settings → Networking → Generate Domain</strong>. Railway will give you a URL like <Code>https://web-production-xxxx.up.railway.app</Code>. Copy this URL.</>,
+                              tip:"Make sure the URL starts with https:// — the app will show a ☁ cloud indicator when it detects a secure URL."},
+                            {n:"D",col:"#a78bfa",title:"Paste the URL and connect",
+                              body:<>Paste the Railway URL into the API URL field below and click <strong style={{color:GOLD}}>TEST</strong>. You should see ✅ Connected. From then on, the Import Option tab will use your cloud server — no local Python needed.</>,
+                              tip:"If TEST fails, wait another minute and try again — Railway may still be starting up the container."},
+                          ].map(({n,col,title,body,tip})=>(
+                            <div key={n} style={{display:"flex",gap:14,background:"rgba(255,255,255,0.02)",border:"1px solid rgba(255,255,255,0.05)",borderRadius:8,padding:"14px 16px"}}>
+                              <div style={{background:"rgba(167,139,250,0.15)",color:col,borderRadius:"50%",width:28,height:28,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,flexShrink:0,marginTop:1}}>{n}</div>
+                              <div style={{flex:1}}>
+                                <div style={{fontSize:13,fontWeight:700,color:"#c8d8e8",marginBottom:6}}>{title}</div>
+                                <div style={{fontSize:12,color:"rgba(200,216,232,0.55)",lineHeight:1.8,marginBottom:tip?8:0}}>{body}</div>
+                                {tip&&<div style={{fontSize:11,color:"rgba(167,139,250,0.7)",background:"rgba(167,139,250,0.06)",border:"1px solid rgba(167,139,250,0.15)",borderRadius:5,padding:"6px 10px",lineHeight:1.6}}>💡 {tip}</div>}
+                              </div>
+                            </div>
+                          ))}
+                          <div style={{background:"rgba(167,139,250,0.05)",border:"1px solid rgba(167,139,250,0.15)",borderRadius:8,padding:"12px 16px",fontSize:12,color:"rgba(200,216,232,0.45)",lineHeight:1.7}}>
+                            <strong style={{color:"rgba(167,139,250,0.7)"}}>Railway free tier:</strong> Includes $5 of compute per month, which runs a lightweight Flask server for many hours. If you exceed it, the service sleeps until the next month. For occasional use this is more than enough.
+                          </div>
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ))}
-                <div style={{borderTop:"1px solid rgba(255,255,255,0.07)",paddingTop:14,marginTop:4}}>
-                  <div style={{fontSize:12,fontWeight:700,color:GOLD,marginBottom:6}}>☁ CLOUD DEPLOY (Railway)</div>
-                  <div style={{fontSize:12,color:"rgba(200,216,232,0.5)",lineHeight:1.75}}>
-                    A. Push server.py, requirements.txt, Procfile to a GitHub repo.<br/>
-                    B. Go to <a href="https://railway.app" target="_blank" rel="noopener noreferrer" style={{color:GOLD}}>railway.app</a>, create a new project from GitHub, deploy.<br/>
-                    C. Copy the Railway URL and paste it into the API URL field below.
-                  </div>
-                </div>
+                  );
+                })()}
               </div>
             )}
 
             {/* API URL */}
-            <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:18,flexWrap:"wrap"}}>
-              <div style={{fontSize:10,letterSpacing:"0.1em",color:"rgba(200,216,232,0.35)",flexShrink:0}}>API URL</div>
-              <input value={apiUrl} onChange={e=>setApiUrl(e.target.value)}
-                style={{flex:1,minWidth:200,background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:4,padding:"6px 10px",color:"#c8d8e8",fontFamily:"monospace",fontSize:12}}/>
-              <button onClick={testApi} style={{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.12)",color:"rgba(200,216,232,0.7)",padding:"6px 14px",borderRadius:4,cursor:"pointer",fontSize:11,fontWeight:700,letterSpacing:"0.08em"}}>TEST</button>
-              {apiTestMsg&&<span style={{fontSize:11,color:apiTestMsg.includes("✅")?"#4ade80":apiTestMsg.includes("testing")?"#f0c060":"#f87171"}}>{apiTestMsg}</span>}
-              <span style={{fontSize:10,color:apiUrl.startsWith("https")?"#4ade80":"rgba(200,216,232,0.25)"}}>
-                {apiUrl.startsWith("https")?"☁ cloud":"⬡ local"}
-              </span>
-            </div>
+            {(()=>{
+              const v=validateUrl(apiUrl);
+              const isRailway=apiUrl.includes("railway.app");
+              return (
+                <div style={{marginBottom:18}}>
+                  <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                    <div style={{fontSize:10,letterSpacing:"0.1em",color:"rgba(200,216,232,0.35)",flexShrink:0}}>API URL</div>
+                    <input value={apiUrl} onChange={e=>{setApiUrl(e.target.value);setApiTestMsg("");}}
+                      style={{flex:1,minWidth:200,background:"rgba(255,255,255,0.04)",border:`1px solid ${v.ok?"rgba(255,255,255,0.1)":"rgba(248,113,113,0.4)"}`,borderRadius:4,padding:"6px 10px",color:"#c8d8e8",fontFamily:"monospace",fontSize:12}}/>
+                    <button onClick={testApi} style={{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.12)",color:"rgba(200,216,232,0.7)",padding:"6px 14px",borderRadius:4,cursor:"pointer",fontSize:11,fontWeight:700,letterSpacing:"0.08em"}}>TEST</button>
+                    <span style={{fontSize:10,color:apiUrl.startsWith("https")?"#4ade80":"rgba(200,216,232,0.25)"}}>
+                      {apiUrl.startsWith("https")?"☁ cloud":"⬡ local"}
+                    </span>
+                  </div>
+                  {/* Live URL validation warning */}
+                  {!v.ok&&<div style={{marginTop:6,fontSize:11,color:"#f87171",display:"flex",alignItems:"center",gap:8}}>
+                    {v.msg}
+                    {v.fixed&&v.fixed!==apiUrl&&<button onClick={()=>{setApiUrl(v.fixed);setApiTestMsg("");}} style={{background:"rgba(248,113,113,0.1)",border:"1px solid rgba(248,113,113,0.3)",color:"#f87171",borderRadius:4,padding:"2px 8px",cursor:"pointer",fontSize:10,fontWeight:700}}>AUTO-FIX</button>}
+                  </div>}
+                  {/* Test result */}
+                  {apiTestMsg&&<div style={{marginTop:6,fontSize:11,color:apiTestMsg.includes("✅")?"#4ade80":apiTestMsg.includes("testing")?"#f0c060":"#f87171",lineHeight:1.6}}>{apiTestMsg}</div>}
+                  {/* Railway-specific hint */}
+                  {isRailway&&apiTestMsg.includes("❌")&&<div style={{marginTop:8,background:"rgba(167,139,250,0.08)",border:"1px solid rgba(167,139,250,0.2)",borderRadius:6,padding:"10px 12px",fontSize:11,color:"rgba(167,139,250,0.8)",lineHeight:1.7}}>
+                    <strong>Railway troubleshooting:</strong> Check your Railway dashboard — the service should show a green "Active" status. If it shows "Crashed", check the deploy logs. Make sure the URL is the Railway-generated domain with no port number (Railway exposes port 443 externally regardless of what the app binds internally).
+                  </div>}
+                </div>
+              );
+            })()}
 
             {/* Ticker search */}
             <div style={{display:"flex",gap:10,alignItems:"flex-end",flexWrap:"wrap",marginBottom:16}}>
