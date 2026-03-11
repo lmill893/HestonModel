@@ -602,6 +602,106 @@ function validateUrl(raw) {
   return {ok:true, msg:null, fixed:u};
 }
 
+// ── Trade signal engine ───────────────────────────────────────────────────────
+// Compares model price vs market price, moneyness, vol regime, theta decay,
+// and delta to generate a structured buy/sell/pass suggestion with reasoning.
+function generateSignal(result, params, yfSelectedOption) {
+  if (!result || !result.marketPrice || result.marketPrice <= 0) return null;
+
+  const { price: modelPrice, marketPrice, bs, mean, std, paths } = result;
+  const { S, K, T, sigma, type, r } = params;
+
+  const signals = [];
+  const reasons = [];
+  const warnings = [];
+
+  // ── 1. Model vs Market mispricing ─────────────────────────────────────────
+  const edge = modelPrice - marketPrice;          // positive = model thinks option is cheap
+  const edgePct = Math.abs(edge) / marketPrice * 100;
+  const isCheap  = edge >  marketPrice * 0.04;   // model > market by >4%
+  const isExpensive = edge < -marketPrice * 0.04; // model < market by >4%
+
+  if (isCheap) {
+    signals.push({dir:"BUY", strength: Math.min(edgePct / 20, 1), reason:"model_cheap"});
+    reasons.push(`Model prices this at $${modelPrice.toFixed(2)}, market asks $${marketPrice.toFixed(2)} — you'd be buying ${edgePct.toFixed(1)}% below fair value if the model is right`);
+  } else if (isExpensive) {
+    signals.push({dir:"SELL", strength: Math.min(edgePct / 20, 1), reason:"model_expensive"});
+    reasons.push(`Model prices this at $${modelPrice.toFixed(2)}, market asks $${marketPrice.toFixed(2)} — option appears ${edgePct.toFixed(1)}% overpriced relative to the model`);
+  } else {
+    reasons.push(`Model price ($${modelPrice.toFixed(2)}) is within 4% of market ($${marketPrice.toFixed(2)}) — no strong mispricing signal`);
+  }
+
+  // ── 2. Moneyness ──────────────────────────────────────────────────────────
+  const moneyness = S / K;
+  const isDeepOTM = type==="call" ? moneyness < 0.88 : moneyness > 1.12;
+  const isDeepITM = type==="call" ? moneyness > 1.12 : moneyness < 0.88;
+  const isATM = Math.abs(moneyness - 1) < 0.03;
+
+  if (isDeepOTM) warnings.push("Deep OTM — low probability of profit, high leverage. Small position sizes appropriate.");
+  if (isDeepITM) warnings.push("Deep ITM — behaves more like the underlying stock. High premium, lower leverage.");
+
+  // ── 3. Time decay pressure ────────────────────────────────────────────────
+  const d1 = (Math.log(S/K) + (r + 0.5*sigma*sigma)*T) / (sigma*Math.sqrt(T));
+  const phi = Math.exp(-(d1*d1)/2) / Math.sqrt(2*Math.PI);
+  const dailyTheta = -S * phi * sigma / (2 * Math.sqrt(T)) / 365;
+  const thetaAsPctOfPrice = Math.abs(dailyTheta) / marketPrice * 100;
+
+  if (T < 0.1 && thetaAsPctOfPrice > 1.5) {
+    warnings.push(`High theta decay — losing ~${thetaAsPctOfPrice.toFixed(1)}% of value per day. Buyers need a fast move; sellers benefit from time passing.`);
+    if (signals.some(s=>s.dir==="BUY")) {
+      warnings.push("With this much time decay, buying requires a strong directional conviction — consider selling instead to collect premium.");
+    }
+  } else if (T < 0.25) {
+    warnings.push(`Short-dated option (${(T*365).toFixed(0)} days). Theta decay accelerates as expiry approaches.`);
+  }
+
+  // ── 4. Probability of profit ──────────────────────────────────────────────
+  const finals = paths.map(p => p[p.length-1]);
+  const breakeven = type==="call" ? K + marketPrice : K - marketPrice;
+  const profitablePaths = finals.filter(f => type==="call" ? f > breakeven : f < breakeven);
+  const pop = profitablePaths.length / finals.length;
+  reasons.push(`Probability of profit at expiry: ${(pop*100).toFixed(0)}% (breakeven ${type==="call"?">":"<"} $${breakeven.toFixed(2)})`);
+
+  if (pop < 0.25) warnings.push("Low probability of profit (<25%). This is a high-risk, high-reward lottery ticket.");
+  if (pop > 0.65) reasons.push("Relatively high probability of finishing in profit.");
+
+  // ── 5. Vol regime — is IV elevated vs model's long-run vol? ───────────────
+  const longRunVol = Math.sqrt(params.theta) * 100;
+  const ivPct = sigma * 100;
+  const volPremium = ivPct - longRunVol;
+
+  if (volPremium > 8) {
+    signals.push({dir:"SELL", strength: Math.min(volPremium / 30, 1), reason:"vol_rich"});
+    reasons.push(`IV (${ivPct.toFixed(0)}%) is ${volPremium.toFixed(0)}pp above long-run vol (${longRunVol.toFixed(0)}%) — volatility is elevated, favouring option sellers`);
+  } else if (volPremium < -5) {
+    signals.push({dir:"BUY", strength: Math.min(Math.abs(volPremium) / 30, 1), reason:"vol_cheap"});
+    reasons.push(`IV (${ivPct.toFixed(0)}%) is below long-run vol (${longRunVol.toFixed(0)}%) — volatility appears cheap, favouring buyers`);
+  }
+
+  // ── 6. Bid-ask spread quality ──────────────────────────────────────────────
+  if (yfSelectedOption) {
+    const spread = yfSelectedOption.ask - yfSelectedOption.bid;
+    const spreadPct = spread / marketPrice * 100;
+    if (spreadPct > 15) warnings.push(`Wide bid-ask spread (${spreadPct.toFixed(0)}% of mid price) — liquidity is poor. You'll likely pay significant slippage to enter or exit.`);
+    else if (spreadPct < 4) reasons.push(`Tight bid-ask spread (${spreadPct.toFixed(0)}%) — good liquidity for entry and exit.`);
+  }
+
+  // ── Aggregate signal ──────────────────────────────────────────────────────
+  const buyStrength  = signals.filter(s=>s.dir==="BUY" ).reduce((a,s)=>a+s.strength, 0);
+  const sellStrength = signals.filter(s=>s.dir==="SELL").reduce((a,s)=>a+s.strength, 0);
+
+  let verdict, verdictCol, verdictBg, verdictBorder, verdictIcon;
+  const net = buyStrength - sellStrength;
+
+  if      (net >  0.6) { verdict="STRONG BUY";  verdictCol="#4ade80"; verdictBg="rgba(74,222,128,0.08)";  verdictBorder="rgba(74,222,128,0.35)";  verdictIcon="▲▲"; }
+  else if (net >  0.2) { verdict="BUY";          verdictCol="#86efac"; verdictBg="rgba(74,222,128,0.06)";  verdictBorder="rgba(74,222,128,0.25)";  verdictIcon="▲";  }
+  else if (net < -0.6) { verdict="STRONG SELL";  verdictCol="#f87171"; verdictBg="rgba(248,113,113,0.08)"; verdictBorder="rgba(248,113,113,0.35)"; verdictIcon="▼▼"; }
+  else if (net < -0.2) { verdict="SELL / WRITE"; verdictCol="#fca5a5"; verdictBg="rgba(248,113,113,0.06)"; verdictBorder="rgba(248,113,113,0.25)"; verdictIcon="▼";  }
+  else                 { verdict="NEUTRAL / PASS"; verdictCol=GOLD;    verdictBg="rgba(240,192,96,0.06)";  verdictBorder="rgba(240,192,96,0.25)";  verdictIcon="◆";  }
+
+  return { verdict, verdictCol, verdictBg, verdictBorder, verdictIcon, reasons, warnings, pop, edge, edgePct, net, buyStrength, sellStrength };
+}
+
 // ── Presets ───────────────────────────────────────────────────────────────────
 const PRESETS = {
   "ATM CALL":   {S:100,K:100,T:0.5,r:0.05,sigma:0.20,type:"call",kappa:2.0,theta:0.04,xi:0.3,rho:-0.7,n:1000,steps:100},
@@ -705,12 +805,80 @@ function App() {
     }
   };
 
+  const [calibration,setCalibration]=useState(null);
+
+  // Derive Heston parameter suggestions from market data
+  const calibrateFromMarket=(stock, chain, opt)=>{
+    const histVol = stock.annualVol || 0.20;
+    const iv = opt.impliedVol > 0.01 ? opt.impliedVol : histVol;
+
+    // θ: long-run variance = historical vol squared (where vol mean-reverts to)
+    const theta = parseFloat((histVol * histVol).toFixed(6));
+
+    // κ: mean reversion speed — faster for indices, slower for single stocks
+    // Proxy: if IV >> histVol, vol is elevated → faster reversion expected
+    const volRatio = iv / histVol;
+    const kappa = parseFloat(Math.min(Math.max(volRatio * 2.0, 1.0), 6.0).toFixed(1));
+
+    // ξ: vol of vol — derived from IV skew across the chain
+    // Compare OTM put IV vs ATM IV: steeper skew → higher ξ
+    let xi = 0.35; // default
+    if (chain && chain.options && chain.options.length > 3) {
+      const S = stock.price;
+      const opts = chain.options.filter(o => o.impliedVol > 0.01);
+      const atm = opts.reduce((best,o) => Math.abs(o.strike-S) < Math.abs(best.strike-S) ? o : best, opts[0]);
+      const otmPuts = opts.filter(o => o.strike < S * 0.92 && o.impliedVol > 0.01);
+      if (otmPuts.length > 0 && atm) {
+        const avgOtmIv = otmPuts.reduce((s,o)=>s+o.impliedVol,0)/otmPuts.length;
+        const skew = avgOtmIv - atm.impliedVol;
+        xi = parseFloat(Math.min(Math.max(0.15 + skew * 2.5, 0.15), 1.2).toFixed(2));
+      }
+    }
+
+    // ρ: correlation — negative for equities, more negative with steeper skew
+    // Typical equity range −0.4 to −0.8
+    let rho = -0.65; // equity default
+    if (chain && chain.options && chain.options.length > 3) {
+      const S = stock.price;
+      const opts = chain.options.filter(o => o.impliedVol > 0.01);
+      const atm = opts.reduce((best,o) => Math.abs(o.strike-S) < Math.abs(best.strike-S) ? o : best, opts[0]);
+      const otmPuts  = opts.filter(o => o.strike < S * 0.93);
+      const otmCalls = opts.filter(o => o.strike > S * 1.07);
+      if (otmPuts.length && otmCalls.length && atm) {
+        const putSkew  = otmPuts.reduce((s,o)=>s+o.impliedVol,0)/otmPuts.length  - atm.impliedVol;
+        const callSkew = otmCalls.reduce((s,o)=>s+o.impliedVol,0)/otmCalls.length - atm.impliedVol;
+        const asymmetry = putSkew - callSkew; // positive = put skew dominates
+        rho = parseFloat(Math.min(Math.max(-0.4 - asymmetry * 3, -0.95), -0.1).toFixed(2));
+      }
+    }
+
+    return {
+      kappa, theta, xi, rho,
+      sigma: parseFloat(iv.toFixed(4)),
+      rationale: {
+        theta: `√θ = ${(Math.sqrt(theta)*100).toFixed(1)}% matches 1Y historical vol`,
+        kappa: `κ = ${kappa} — ${kappa>=4?"fast reversion (IV well above hist vol)":kappa>=2?"moderate reversion":"slow reversion (IV near hist vol)"}`,
+        xi:    `ξ = ${xi} — derived from ${chain?.type==="puts"||yfOptType==="puts"?"put":"IV"} skew steepness`,
+        rho:   `ρ = ${rho} — ${rho<-0.7?"strong negative skew (crash protection priced in)":rho<-0.5?"moderate equity skew":"mild skew"}`,
+      }
+    };
+  };
+
   const importOption=(opt)=>{
     if(!yfStock||!yfChain) return;
     const now=new Date(), exp=new Date(yfChain.expiry);
     const T=Math.max(0.01,(exp-now)/(365.25*24*3600*1000));
     const sigma=opt.impliedVol>0.01?opt.impliedVol:(yfStock.annualVol||0.25);
-    setParams(p=>({...p,S:yfStock.price,K:opt.strike,T:parseFloat(T.toFixed(3)),sigma:parseFloat(sigma.toFixed(4)),type:yfOptType==="calls"?"call":"put"}));
+    const cal = calibrateFromMarket(yfStock, yfChain, opt);
+    setCalibration({...cal, applied:false});
+    setParams(p=>({...p,
+      S:yfStock.price, K:opt.strike,
+      T:parseFloat(T.toFixed(3)),
+      sigma:parseFloat(sigma.toFixed(4)),
+      type:yfOptType==="calls"?"call":"put",
+      // auto-apply calibrated Heston params
+      kappa:cal.kappa, theta:cal.theta, xi:cal.xi, rho:cal.rho,
+    }));
     setYfSelectedOption(opt); setTab("pricer"); setTimeout(run,80);
   };
 
@@ -802,9 +970,62 @@ function App() {
         <div style={{display:"flex",flexDirection:"column",gap:12,width:"100%",maxWidth:1400}}>
 
           {/* Preset buttons */}
-          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
             {Object.keys(PRESETS).map(name=><button key={name} className="preset-btn" onClick={()=>applyPreset(name)}>{name}</button>)}
+            {yfStock&&<div style={{marginLeft:"auto",fontSize:10,color:"rgba(200,216,232,0.3)",letterSpacing:"0.08em"}}>
+              {yfStock.name} · <span style={{color:GREEN}}>${yfStock.price}</span> · hist vol <span style={{color:GOLD}}>{(yfStock.annualVol*100).toFixed(1)}%</span>
+            </div>}
           </div>
+
+          {/* Calibration banner — shown after importing a real option */}
+          {calibration&&(
+            <div style={{background:"rgba(96,165,250,0.06)",border:"1px solid rgba(96,165,250,0.25)",borderRadius:8,padding:"14px 18px",animation:"bm-in .22s ease"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
+                <div>
+                  <span style={{fontSize:11,fontWeight:700,color:"#60a5fa",letterSpacing:"0.1em"}}>⚙ HESTON CALIBRATION</span>
+                  <span style={{fontSize:10,color:"rgba(200,216,232,0.35)",marginLeft:10}}>Parameters estimated from market data · applied automatically on import</span>
+                </div>
+                <button onClick={()=>setCalibration(null)} style={{background:"none",border:"none",color:"rgba(200,216,232,0.25)",cursor:"pointer",fontSize:14}}>×</button>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:10}}>
+                {[
+                  {key:"kappa", label:"κ  Mean Reversion",  val:calibration.kappa, fmt:v=>v.toFixed(1),   note:calibration.rationale.kappa},
+                  {key:"theta", label:"θ  Long-Run Var",    val:calibration.theta, fmt:v=>`√θ = ${(Math.sqrt(v)*100).toFixed(1)}%`, note:calibration.rationale.theta},
+                  {key:"xi",    label:"ξ  Vol of Vol",      val:calibration.xi,    fmt:v=>v.toFixed(2),   note:calibration.rationale.xi},
+                  {key:"rho",   label:"ρ  Correlation",     val:calibration.rho,   fmt:v=>v.toFixed(2),   note:calibration.rationale.rho},
+                ].map(({key,label,val,fmt,note})=>{
+                  const current=params[key];
+                  const same=Math.abs(current-val)<0.001;
+                  return (
+                    <div key={key} style={{background:"rgba(0,0,0,0.2)",borderRadius:6,padding:"10px 12px",border:`1px solid ${same?"rgba(74,222,128,0.2)":"rgba(96,165,250,0.15)"}`}}>
+                      <div style={{fontSize:9,letterSpacing:"0.1em",color:"rgba(200,216,232,0.35)",marginBottom:4}}>{label}</div>
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                        <span style={{fontSize:18,fontWeight:700,color:"#60a5fa"}}>{fmt(val)}</span>
+                        {!same&&<span style={{fontSize:10,color:"rgba(200,216,232,0.35)"}}>current: {fmt(current)}</span>}
+                        {same&&<span style={{fontSize:10,color:GREEN}}>✓ applied</span>}
+                      </div>
+                      <div style={{fontSize:10,color:"rgba(200,216,232,0.4)",lineHeight:1.5,marginBottom:same?0:8}}>{note}</div>
+                      {!same&&<button onClick={()=>{set(key,val);setTimeout(run,30);}}
+                        style={{background:"rgba(96,165,250,0.12)",border:"1px solid rgba(96,165,250,0.3)",color:"#60a5fa",borderRadius:4,padding:"3px 10px",cursor:"pointer",fontSize:10,fontWeight:700,letterSpacing:"0.08em"}}>
+                        APPLY
+                      </button>}
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{marginTop:12,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+                <button onClick={()=>{
+                  setParams(p=>({...p,kappa:calibration.kappa,theta:calibration.theta,xi:calibration.xi,rho:calibration.rho}));
+                  setTimeout(run,30);
+                }} style={{background:"rgba(96,165,250,0.15)",border:"1px solid rgba(96,165,250,0.4)",color:"#60a5fa",borderRadius:5,padding:"6px 16px",cursor:"pointer",fontSize:10,fontWeight:700,letterSpacing:"0.1em"}}>
+                  APPLY ALL
+                </button>
+                <span style={{fontSize:10,color:"rgba(200,216,232,0.25)",lineHeight:1.5}}>
+                  These are estimates from IV skew — not a full calibration. Adjust ξ if the model over/underprices OTM options, and ρ if puts and calls are mispriced in opposite directions.
+                </span>
+              </div>
+            </div>
+          )}
 
           {/* Controls bar */}
           <div className="panel" style={{padding:"16px 20px"}}>
@@ -929,6 +1150,118 @@ function App() {
                       <div style={{fontSize:10,color:"rgba(200,216,232,0.35)",lineHeight:1.5}}>{g.desc}</div>
                     </div>
                   ))}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* ── TRADE SIGNAL ── */}
+          {(()=>{
+            const sig = generateSignal(result, params, yfSelectedOption);
+            if (!sig) return (
+              <div className="panel" style={{padding:"16px 20px",borderColor:"rgba(255,255,255,0.04)"}}>
+                <div style={{fontSize:10,letterSpacing:"0.12em",color:"rgba(200,216,232,0.2)",marginBottom:6}}>TRADE SIGNAL</div>
+                <div style={{fontSize:12,color:"rgba(200,216,232,0.25)",lineHeight:1.7}}>
+                  Import a real option from the <span style={{color:GOLD,cursor:"pointer"}} onClick={()=>setTab("import")}>IMPORT OPTION</span> tab to get a buy/sell signal — the signal engine needs a live market price to compare against the model.
+                </div>
+              </div>
+            );
+            const barW = (v) => `${Math.min(v * 100, 100)}%`;
+            return (
+              <div className="panel" style={{padding:"20px 24px",borderColor:sig.verdictBorder,background:sig.verdictBg}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:18,flexWrap:"wrap",gap:12}}>
+                  {/* Verdict badge */}
+                  <div>
+                    <div style={{fontSize:9,letterSpacing:"0.16em",color:"rgba(200,216,232,0.35)",marginBottom:6}}>MODEL SIGNAL</div>
+                    <div style={{display:"flex",alignItems:"center",gap:10}}>
+                      <div style={{fontSize:28,fontWeight:800,letterSpacing:"0.04em",color:sig.verdictCol,lineHeight:1}}>
+                        {sig.verdictIcon} {sig.verdict}
+                      </div>
+                    </div>
+                    <div style={{fontSize:10,color:"rgba(200,216,232,0.3)",marginTop:4,letterSpacing:"0.06em"}}>
+                      {params.type.toUpperCase()} · K=${params.K} · T={params.T.toFixed(2)}y · σ₀={( params.sigma*100).toFixed(0)}%
+                    </div>
+                  </div>
+
+                  {/* Signal strength bars */}
+                  <div style={{display:"flex",flexDirection:"column",gap:8,minWidth:200}}>
+                    <div>
+                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+                        <span style={{fontSize:9,letterSpacing:"0.1em",color:GREEN}}>BUY SIGNALS</span>
+                        <span style={{fontSize:9,color:GREEN}}>{(sig.buyStrength*100).toFixed(0)}</span>
+                      </div>
+                      <div style={{height:5,background:"rgba(255,255,255,0.06)",borderRadius:3,overflow:"hidden"}}>
+                        <div style={{width:barW(sig.buyStrength),height:"100%",background:"linear-gradient(90deg,rgba(74,222,128,0.4),rgba(74,222,128,0.8))",borderRadius:3,transition:"width .4s ease"}}/>
+                      </div>
+                    </div>
+                    <div>
+                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+                        <span style={{fontSize:9,letterSpacing:"0.1em",color:RED}}>SELL SIGNALS</span>
+                        <span style={{fontSize:9,color:RED}}>{(sig.sellStrength*100).toFixed(0)}</span>
+                      </div>
+                      <div style={{height:5,background:"rgba(255,255,255,0.06)",borderRadius:3,overflow:"hidden"}}>
+                        <div style={{width:barW(sig.sellStrength),height:"100%",background:"linear-gradient(90deg,rgba(248,113,113,0.4),rgba(248,113,113,0.8))",borderRadius:3,transition:"width .4s ease"}}/>
+                      </div>
+                    </div>
+                    <div>
+                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+                        <span style={{fontSize:9,letterSpacing:"0.1em",color:"rgba(200,216,232,0.4)"}}>PROB. OF PROFIT</span>
+                        <span style={{fontSize:9,color:"rgba(200,216,232,0.5)"}}>{(sig.pop*100).toFixed(0)}%</span>
+                      </div>
+                      <div style={{height:5,background:"rgba(255,255,255,0.06)",borderRadius:3,overflow:"hidden"}}>
+                        <div style={{width:`${sig.pop*100}%`,height:"100%",background:"linear-gradient(90deg,rgba(240,192,96,0.3),rgba(240,192,96,0.7))",borderRadius:3}}/>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Key numbers row */}
+                <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:16}}>
+                  {[
+                    {lbl:"MODEL PRICE",  val:`$${result.price.toFixed(3)}`,  col:GOLD},
+                    {lbl:"MARKET MID",   val:`$${result.marketPrice.toFixed(3)}`, col:"#60a5fa"},
+                    {lbl:"EDGE",         val:`${sig.edge>=0?"+":""}$${sig.edge.toFixed(3)} (${sig.edgePct.toFixed(1)}%)`, col:sig.edge>=0?GREEN:RED},
+                    {lbl:"BREAKEVEN",    val:`$${(params.type==="call"?params.K+result.marketPrice:params.K-result.marketPrice).toFixed(2)}`, col:"rgba(200,216,232,0.6)"},
+                    {lbl:"PROB PROFIT",  val:`${(sig.pop*100).toFixed(0)}%`, col:sig.pop>0.5?GREEN:sig.pop>0.3?GOLD:RED},
+                  ].map(({lbl,val,col})=>(
+                    <div key={lbl} style={{flex:"1 1 90px",background:"rgba(0,0,0,0.2)",borderRadius:6,padding:"8px 12px"}}>
+                      <div style={{fontSize:8,letterSpacing:"0.12em",color:"rgba(200,216,232,0.3)",marginBottom:3}}>{lbl}</div>
+                      <div style={{fontSize:15,fontWeight:700,color:col}}>{val}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Reasoning */}
+                <div style={{marginBottom:sig.warnings.length?14:0}}>
+                  <div style={{fontSize:9,letterSpacing:"0.12em",color:"rgba(200,216,232,0.3)",marginBottom:8}}>ANALYSIS</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {sig.reasons.map((r,i)=>(
+                      <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start"}}>
+                        <span style={{color:sig.verdictCol,flexShrink:0,marginTop:1}}>◈</span>
+                        <span style={{fontSize:12,color:"rgba(200,216,232,0.6)",lineHeight:1.7}}>{r}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Warnings */}
+                {sig.warnings.length>0&&(
+                  <div style={{marginTop:14,borderTop:"1px solid rgba(255,255,255,0.06)",paddingTop:14}}>
+                    <div style={{fontSize:9,letterSpacing:"0.12em",color:"rgba(240,192,96,0.5)",marginBottom:8}}>⚠ CONSIDERATIONS</div>
+                    <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                      {sig.warnings.map((w,i)=>(
+                        <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start"}}>
+                          <span style={{color:"rgba(240,192,96,0.6)",flexShrink:0,marginTop:1}}>▸</span>
+                          <span style={{fontSize:12,color:"rgba(200,216,232,0.45)",lineHeight:1.7}}>{w}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Disclaimer */}
+                <div style={{marginTop:16,borderTop:"1px solid rgba(255,255,255,0.05)",paddingTop:12,fontSize:10,color:"rgba(200,216,232,0.2)",lineHeight:1.6}}>
+                  ⓘ This signal is generated mechanically from model vs market price, vol regime, and probability estimates. It is not financial advice. The model's accuracy depends entirely on the quality of the Heston parameter calibration — always verify with your own analysis before trading.
                 </div>
               </div>
             );
